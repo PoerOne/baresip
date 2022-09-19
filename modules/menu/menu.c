@@ -519,6 +519,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 	bool incall;
 	enum sdp_dir ardir, vrdir;
 	uint32_t count;
+	struct pl val;
 	int err;
 	(void)arg;
 
@@ -586,7 +587,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 
 	case UA_EVENT_CALL_PROGRESS:
 		menu_selcall(call);
-		if (ardir != SDP_INACTIVE)
+		if (ardir & SDP_RECVONLY)
 			menu_stop_play();
 		else if (!menu.ringback && !menu_find_call(active_call_test,
 							   call))
@@ -667,7 +668,17 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		if (!str_cmp(prm, "answer") &&
 				call_state(call) == CALL_STATE_ESTABLISHED)
 			menu_selcall(call);
-		video_update(call_video(call), call_peeruri(call));
+
+		if (call_state(call) == CALL_STATE_EARLY) {
+			if (ardir & SDP_RECVONLY) {
+				menu_stop_play();
+			}
+			else if (!menu.ringback &&
+				 !menu_find_call(active_call_test, call)) {
+
+				play_ringback(call);
+			}
+		}
 		break;
 
 	case UA_EVENT_CALL_TRANSFER:
@@ -711,6 +722,19 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		menu_stop_play();
 		call_hold(call, false);
 		menu_selcall(call);
+		break;
+
+	case UA_EVENT_REFER:
+		val = pl_null;
+		if (!strncmp(prm, "sip:", 4))
+			pl_set_str(&val, "invite");
+
+		(void)menu_param_decode(prm, "method", &val);
+		if (!pl_strcmp(&val, "invite")) {
+			info("menu: incoming REFER to %s\n", prm);
+			ua_connect(ua, NULL, NULL, prm, VIDMODE_ON);
+		}
+
 		break;
 
 	case UA_EVENT_REGISTER_OK:

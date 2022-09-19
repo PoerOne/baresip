@@ -189,7 +189,8 @@ static bool request_handler(const struct sip_msg *msg, void *arg)
 
 	(void)arg;
 
-	if (pl_strcmp(&msg->met, "OPTIONS"))
+	if (pl_strcmp(&msg->met, "OPTIONS") &&
+	    pl_strcmp(&msg->met, "REFER"))
 		return false;
 
 	ua = uag_find_msg(msg);
@@ -198,9 +199,15 @@ static bool request_handler(const struct sip_msg *msg, void *arg)
 		return true;
 	}
 
-	ua_handle_options(ua, msg);
+	if (!pl_strcmp(&msg->met, "OPTIONS")) {
+		ua_handle_options(ua, msg);
+		return true;
+	}
 
-	return true;
+	if (!pl_strcmp(&msg->met, "REFER") && !pl_isset(&msg->to.tag))
+		return ua_handle_refer(ua, msg);
+
+	return false;
 }
 
 
