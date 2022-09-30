@@ -4,7 +4,9 @@
  * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <string.h>
+#ifndef WIN32
 #include <dirent.h>
+#endif
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -801,6 +803,10 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 
 static uint32_t count_modules(const char *path)
 {
+#ifdef WIN32
+	(void)path;
+	return 0;
+#else
 	DIR *dirp;
 	struct dirent *dp;
 	uint32_t n = 0;
@@ -824,6 +830,7 @@ static uint32_t count_modules(const char *path)
 	(void)closedir(dirp);
 
 	return n;
+#endif
 }
 
 
@@ -900,10 +907,10 @@ int config_write_template(const char *file, const struct config *cfg)
 
 	info("config: creating config template %s\n", file);
 
-	f = fopen(file, "w");
-	if (!f) {
-		warning("config: writing %s: %m\n", file, errno);
-		return errno;
+	err = fs_fopen(&f, file, "w");
+	if (err) {
+		warning("config: writing %s: %m\n", file, err);
+		return err;
 	}
 
 	(void)re_fprintf(f,
@@ -1157,7 +1164,10 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#avcodec_h265enc\tlibx265\n"
 			"#avcodec_h265dec\thevc\n"
 			"#avcodec_hwaccel\t%s\n",
-			default_avcodec_hwaccel());
+			default_avcodec_hwaccel(),
+			"#avcodec_profile_level_id 42002a\n",
+			"#avcodec_keyint\t\t10\n"
+			);
 
 	(void)re_fprintf(f,
 			"\n# ctrl_dbus\n"

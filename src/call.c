@@ -81,6 +81,7 @@ struct call {
 	bool use_video;
 	bool use_rtp;
 	char *user_data;           /**< User data related to the call       */
+	bool evstop;               /**< UA events stopped flag              */
 };
 
 
@@ -782,7 +783,7 @@ static void call_decode_sip_autoanswer(struct call *call,
 }
 
 
-static int call_streams_alloc(struct call *call, bool got_offer)
+int call_streams_alloc(struct call *call)
 {
 	struct account *acc = call->acc;
 	struct stream_param strm_prm;
@@ -799,7 +800,8 @@ static int call_streams_alloc(struct call *call, bool got_offer)
 	err = audio_alloc(&call->audio, &call->streaml, &strm_prm,
 			  call->cfg, acc, call->sdp,
 			  acc->mnat, call->mnats, acc->menc, call->mencs,
-			  acc->ptime, account_aucodecl(call->acc), !got_offer,
+			  acc->ptime, account_aucodecl(call->acc),
+			  !call->got_offer,
 			  audio_event_handler, audio_level_handler,
 			  audio_error_handler, call);
 	if (err)
@@ -813,7 +815,7 @@ static int call_streams_alloc(struct call *call, bool got_offer)
 				  acc->menc, call->mencs,
 				  "main",
 				  account_vidcodecl(call->acc),
-				  baresip_vidfiltl(), !got_offer,
+				  baresip_vidfiltl(), !call->got_offer,
 				  video_error_handler, call);
 		if (err)
 			return err;
@@ -836,7 +838,7 @@ static int call_streams_alloc(struct call *call, bool got_offer)
 		FOREACH_STREAM {
 			struct stream *strm = le->data;
 
-			err = stream_bundle_init(strm, !got_offer);
+			err = stream_bundle_init(strm, !call->got_offer);
 			if (err)
 				return err;
 		}
@@ -903,7 +905,6 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 {
 	struct call *call;
 	enum vidmode vidmode = prm ? prm->vidmode : VIDMODE_OFF;
-	bool got_offer = false;
 	int err = 0;
 
 	if (!cfg || !local_uri || !acc || !ua || !prm)
@@ -941,6 +942,10 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	err = str_dup(&call->local_uri, local_uri);
 	if (local_name)
 		err |= str_dup(&call->local_name, local_name);
+
+	if (msg)
+		err |= pl_strdup(&call->peer_uri, &msg->from.auri);
+
 	if (err)
 		goto out;
 
@@ -954,7 +959,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 
 	/* Check for incoming SDP Offer */
 	if (msg && mbuf_get_left(msg->mb))
-		got_offer = true;
+		call->got_offer = true;
 
 	/* Initialise media NAT handling */
 	if (acc->mnat) {
@@ -962,7 +967,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 				       dnsc, call->af,
 				       acc->stun_host,
 				       acc->stun_user, acc->stun_pass,
-				       call->sdp, !got_offer,
+				       call->sdp, !call->got_offer,
 				       mnat_handler, call);
 		if (err) {
 			warning("call: medianat session: %m\n", err);
@@ -975,7 +980,7 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 	if (acc->menc) {
 		if (acc->menc->sessh) {
 			err = acc->menc->sessh(&call->mencs, call->sdp,
-					       !got_offer,
+					       !call->got_offer,
 					       menc_event_handler,
 					       menc_error_handler, call);
 			if (err) {
@@ -1001,9 +1006,6 @@ int call_alloc(struct call **callp, const struct config *cfg, struct list *lst,
 		call->not = mem_ref(xcall->not);
 		call->xcall = xcall;
 	}
-
-	if (call->af != AF_UNSPEC)
-		call_streams_alloc(call, got_offer);
 
 	if (cfg->avt.rtp_timeout) {
 		call_enable_rtp_timeout(call, cfg->avt.rtp_timeout*1000);
@@ -1105,6 +1107,7 @@ int call_connect(struct call *call, const struct pl *paddr)
 	/* if the peer-address is a full SIP address then we need
 	 * to parse it and extract the SIP uri part.
 	 */
+	call->peer_uri = mem_deref(call->peer_uri);
 	if (0 == sip_addr_decode(&addr, paddr)) {
 
 		if (pl_isset(&addr.params)) {
@@ -2125,7 +2128,6 @@ static bool valid_addressfamily(struct call *call, const struct stream *strm)
 int call_accept(struct call *call, struct sipsess_sock *sess_sock,
 		const struct sip_msg *msg)
 {
-	bool got_offer;
 	const struct sip_hdr *hdr;
 	int err;
 
@@ -2133,26 +2135,21 @@ int call_accept(struct call *call, struct sipsess_sock *sess_sock,
 		return EINVAL;
 
 	call->outgoing = false;
-
-	got_offer = (mbuf_get_left(msg->mb) > 0);
-
-	err = pl_strdup(&call->peer_uri, &msg->from.auri);
-	if (err)
-		return err;
-
 	if (pl_isset(&msg->from.dname)) {
 		err = pl_strdup(&call->peer_name, &msg->from.dname);
 		if (err)
 			return err;
 	}
 
-	if (got_offer) {
+	err = call_streams_alloc(call);
+	if (err)
+		return err;
+
+	if (call->got_offer) {
 
 		err = sdp_decode(call->sdp, msg->mb, true);
 		if (err)
 			return err;
-
-		call->got_offer = true;
 
 		/*
 		 * Each media description in the SDP answer MUST
@@ -2184,7 +2181,7 @@ int call_accept(struct call *call, struct sipsess_sock *sess_sock,
 				   488, "Not Acceptable Here");
 
 			call_event_handler(call, CALL_EVENT_CLOSED,
-					   "No audio or video codecs");
+					   "No common audio or video codecs");
 
 			return 0;
 		}
@@ -2344,7 +2341,7 @@ static int sipsess_desc_handler(struct mbuf **descp, const struct sa *src,
 		sdp_session_set_laddr(call->sdp, src);
 
 	if (list_isempty(&call->streaml)) {
-		err = call_streams_alloc(call, false);
+		err = call_streams_alloc(call);
 		if (err)
 			return err;
 
@@ -3081,4 +3078,22 @@ int call_set_user_data(struct call *call, const char *user_data)
 		return err;
 
 	return 0;
+}
+
+
+void call_set_evstop(struct call *call, bool stop)
+{
+	if (!call)
+		return;
+
+	call->evstop = stop;
+}
+
+
+bool call_is_evstop(struct call *call)
+{
+	if (!call)
+		return false;
+
+	return call->evstop;
 }

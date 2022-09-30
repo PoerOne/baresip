@@ -31,7 +31,12 @@ find_package(REM REQUIRED)
 # Compile options
 #
 
-option(STATIC "Build static" OFF)
+if(WIN32)
+  option(STATIC "Build static" ON)
+else()
+  option(STATIC "Build static" OFF)
+endif()
+
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_C_STANDARD 11)
@@ -59,7 +64,9 @@ else()
 endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wshorten-64-to-32 -Watomic-implicit-seq-cst)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:-Watomic-implicit-seq-cst;-Wshorten-64-to-32>"
+  )
 endif()
 
 find_package(re CONFIG REQUIRED HINTS ../re/cmake)
@@ -76,9 +83,25 @@ include_directories(
 
 link_directories(/usr/local/lib)
 
-add_definitions(
-  -DSHARE_PATH="${SHARE_PATH}"
-)
+if(MOD_PATH)
+  add_definitions(-DMOD_PATH="${MOD_PATH}")
+elseif(CMAKE_INSTALL_FULL_LIBDIR)
+  add_definitions(-DMOD_PATH="${CMAKE_INSTALL_FULL_LIBDIR}/baresip/modules")
+endif()
+
+if(SHARE_PATH)
+  add_definitions(-DSHARE_PATH="${SHARE_PATH}")
+else()
+  add_definitions(-DSHARE_PATH="${CMAKE_INSTALL_FULL_DATADIR}/baresip")
+endif()
+
+if(DEFAULT_CAFILE)
+  add_definitions(-DDEFAULT_CAFILE="${DEFAULT_CAFILE}")
+endif()
+
+if(DEFAULT_AUDIO_DEVICE)
+  add_definitions(-DDEFAULT_AUDIO_DEVICE="${DEFAULT_AUDIO_DEVICE}")
+endif()
 
 if(STATIC)
   add_definitions(-DSTATIC)
@@ -154,6 +177,15 @@ foreach(mod IN LISTS MODULES)
   set_target_properties(${mod} PROPERTIES PREFIX "")
 endforeach()
 
+foreach(mod IN LISTS APP_MODULES)
+  add_subdirectory(
+    ${APP_MODULES_DIR}/${mod}
+    ${CMAKE_CURRENT_BINARY_DIR}/app_modules/${mod}
+  )
+  set_target_properties(${mod} PROPERTIES PREFIX "")
+  list(APPEND MODULES ${mod})
+endforeach()
+
 if(STATIC)
   foreach(mod IN LISTS MODULES)
     set(MOD_EXPORTS
@@ -184,9 +216,11 @@ endif()
 #
 
 set(LINKLIBS ${REM_LIBRARIES} ${RE_LIBRARIES} Threads::Threads)
+
 if(ZLIB_FOUND)
   list(APPEND LINKLIBS ZLIB::ZLIB)
 endif()
+
 if(USE_OPENSSL)
   list(APPEND LINKLIBS OpenSSL::SSL OpenSSL::Crypto)
 endif()
@@ -201,9 +235,14 @@ endif()
 if(STATIC)
   add_library(baresip STATIC ${SRCS} ${HEADERS})
   target_link_libraries(baresip PUBLIC ${LINKLIBS} ${MODULES})
+  target_include_directories(baresip PUBLIC include)
 else()
   add_library(baresip SHARED ${SRCS} ${HEADERS})
   target_link_libraries(baresip PRIVATE ${LINKLIBS})
+endif()
+
+if(MSVC)
+  set_target_properties(baresip PROPERTIES OUTPUT_NAME "libbaresip")
 endif()
 
 set_target_properties(baresip PROPERTIES POSITION_INDEPENDENT_CODE ON)
