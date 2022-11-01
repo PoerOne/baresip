@@ -19,10 +19,10 @@
  *
  * Examples:
  \verbatim
-  "User 1 with password prompt" <sip:user@domain.com>
-  "User 2 with stored password" <sip:user@domain.com>;auth_pass=pass
-  "User 2 with ICE" <sip:user@1.2.3.4;transport=tcp>;medianat=ice
-  "User 3 with IPv6" <sip:user@[2001:df8:0:16:216:6fff:fe91:614c]:5070>
+  "User 1 with password prompt" <sip:user@example.com>
+  "User 2 with stored password" <sip:user@example.com>;auth_pass=pass
+  "User 2 with ICE" <sip:user@192.0.2.4;transport=tcp>;medianat=ice
+  "User 3 with IPv6" <sip:user@[2001:db8:0:16:216:6fff:fe91:614c]:5070>
  \endverbatim
  */
 
@@ -81,18 +81,18 @@ static int account_write_template(const char *file)
 			 "#    ;stunuser=STUN/TURN/ICE-username\n"
 			 "#    ;stunpass=STUN/TURN/ICE-password\n"
 			 "#    ;stunserver=stun:[user:pass]@host[:port]\n"
-			 "#    ;video_codecs=h264,h263,...\n"
+			 "#    ;video_codecs=h264,vp8,...\n"
 			 "#\n"
 			 "# Examples:\n"
 			 "#\n"
-			 "#  <sip:user@domain.com>"
+			 "#  <sip:user@example.com>"
 		         ";auth_pass=secret\n"
-			 "#  <sip:user@domain.com;transport=tcp>"
+			 "#  <sip:user@example.com;transport=tcp>"
 		         ";auth_pass=secret\n"
-			 "#  <sip:user@1.2.3.4;transport=tcp>"
+			 "#  <sip:user@192.0.2.4;transport=tcp>"
 		         ";auth_pass=secret\n"
 			 "#  <sip:user@"
-			 "[2001:df8:0:16:216:6fff:fe91:614c]:5070"
+			 "[2001:db8:0:16:216:6fff:fe91:614c]:5070"
 			 ";transport=tcp>;auth_pass=secret\n"
 			 "#\n"
 			 "#\n"
