@@ -45,6 +45,8 @@ static enum vidfmt avpixfmt_to_vidfmt(enum AVPixelFormat pix_fmt)
 	case AV_PIX_FMT_UYVY422:  return VID_FMT_UYVY422;
 	case AV_PIX_FMT_YUYV422:  return VID_FMT_YUYV422;
 	case AV_PIX_FMT_RGBA:     return VID_FMT_RGB32;
+	case AV_PIX_FMT_YUV422P:  return VID_FMT_YUV422P;
+	case AV_PIX_FMT_YUVJ422P: return VID_FMT_YUV422P;
 	default:                  return (enum vidfmt)-1;
 	}
 }
@@ -163,8 +165,6 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 		if (!frame2)
 			goto out;
 
-		/* Many hw decoders are happy about YUV420P */
-		frame2->format = AV_PIX_FMT_YUV420P;
 		ret = av_hwframe_transfer_data(frame2, frame, 0);
 		if (ret < 0) {
 			av_frame_free(&frame2);

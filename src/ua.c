@@ -622,7 +622,7 @@ static int sdp_connection(struct mbuf *mb, int *af, struct sa *sa)
 
 	*af = AF_UNSPEC;
 	err = re_regex((char *)mbuf_buf(mb), mbuf_get_left(mb),
-		       "IN IP[46]+ [^ \r\n]+", &pl1, &pl2);
+		       "c=IN IP[46]1 [^ \r\n]+", &pl1, &pl2);
 	if (err)
 		return EINVAL;
 
@@ -643,12 +643,13 @@ static int sdp_connection(struct mbuf *mb, int *af, struct sa *sa)
 				"m=video [0-9]+ ", &pl1);
 
 	if (err)
-		return EINVAL;
+		goto out;
 
 	err = sa_set_str(sa, addr, pl_u32(&pl1));
 	if (sa_af(sa) == AF_INET6 && sa_is_linklocal(sa))
 		err |= net_set_dst_scopeid(net, sa);
 
+out:
 	mem_deref(addr);
 	return err;
 }
@@ -817,7 +818,7 @@ int ua_call_alloc(struct call **callp, struct ua *ua,
 
 	sa_init(&dst, AF_UNSPEC);
 	if (msg && !sdp_connection(msg->mb, &af, &dst)) {
-		info("ua: using origin address %j of SDP offer\n", &dst);
+		info("ua: using connection-address %j of SDP offer\n", &dst);
 		sa_cpy(&ua->dst, &dst);
 	}
 	else if (sa_isset(&ua->dst, SA_ADDR)) {

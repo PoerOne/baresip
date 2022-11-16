@@ -170,7 +170,6 @@ set(SRCS
   src/peerconn.c
   src/play.c
   src/reg.c
-  src/rtpext.c
   src/rtpstat.c
   src/sdp.c
   src/sipreq.c
@@ -345,6 +344,7 @@ endif()
 
 install(TARGETS baresip_exe baresip
   RUNTIME
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
     COMPONENT Applications
   LIBRARY
     DESTINATION ${CMAKE_INSTALL_LIBDIR}
