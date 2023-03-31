@@ -68,8 +68,8 @@ int test_account(void)
 	ASSERT_STREQ("bob@bob.com", account_stun_user(acc));
 	ASSERT_STREQ("taj:aa", account_stun_pass(acc));
 	ASSERT_STREQ("stunserver.org", account_stun_host(acc));
-	ASSERT_STREQ("no", account_mwi(acc));
-	ASSERT_STREQ("no", account_call_transfer(acc));
+	ASSERT_TRUE(!account_mwi(acc));
+	ASSERT_TRUE(!account_call_transfer(acc));
 
  out:
 	mem_deref(acc);
@@ -133,7 +133,7 @@ int test_account_uri_complete(void)
 	mb = mbuf_alloc(256);
 	ASSERT_TRUE(mb != NULL);
 
-	for (size_t i=0; i<ARRAY_SIZE(testv); i++) {
+	for (size_t i=0; i<RE_ARRAY_SIZE(testv); i++) {
 
 		const struct test *test = &testv[i];
 

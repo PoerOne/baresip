@@ -131,6 +131,8 @@ int mediatrack_start_video(struct media_track *media)
 		info("mediatrack: video stream is disabled..\n");
 	}
 
+	stream_set_rtcp_interval(video_strm(vid), 1000);
+
 	return 0;
 }
 
@@ -164,6 +166,24 @@ struct stream *media_get_stream(const struct media_track *media)
 	case MEDIA_KIND_VIDEO: return video_strm(media->u.vid);
 	default:               return NULL;
 	}
+}
+
+
+struct audio *media_get_audio(const struct media_track *media)
+{
+	if (!media || media->kind != MEDIA_KIND_AUDIO)
+		return NULL;
+
+	return media->u.au;
+}
+
+
+struct video *media_get_video(const struct media_track *media)
+{
+	if (!media || media->kind != MEDIA_KIND_VIDEO)
+		return NULL;
+
+	return media->u.vid;
 }
 
 

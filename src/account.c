@@ -24,7 +24,7 @@ static void destructor(void *arg)
 	list_clear(&acc->vidcodecl);
 	mem_deref(acc->auth_user);
 	mem_deref(acc->auth_pass);
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++)
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++)
 		mem_deref(acc->outboundv[i]);
 	mem_deref(acc->regq);
 	mem_deref(acc->sipnat);
@@ -148,6 +148,8 @@ static int media_decode(struct account *acc, const struct pl *prm)
 	err |= param_dstr(&acc->mnatid,   prm, "medianat");
 	err |= param_u32(&acc->ptime,     prm, "ptime");
 	err |= param_bool(&acc->rtcp_mux, prm, "rtcp_mux");
+	acc->pinhole = true;
+	err |= param_bool(&acc->pinhole, &acc->laddr.params, "natpinhole");
 
 	return err;
 }
@@ -382,7 +384,7 @@ static int audio_codecs_decode(struct account *acc, const struct pl *prm)
 			/* NOTE: static list with references to aucodec */
 			list_append(&acc->aucodecl, &acc->acv[i++], ac);
 
-			if (i >= ARRAY_SIZE(acc->acv))
+			if (i >= RE_ARRAY_SIZE(acc->acv))
 				break;
 		}
 	}
@@ -424,7 +426,7 @@ static int video_codecs_decode(struct account *acc, const struct pl *prm)
 						vc);
 
 				acc->videoen = true;
-				if (i >= ARRAY_SIZE(acc->vcv))
+				if (i >= RE_ARRAY_SIZE(acc->vcv))
 					return 0;
 			}
 		}
@@ -488,7 +490,7 @@ static int sip_params_decode(struct account *acc, const struct sip_addr *aor)
 
 	err |= param_dstr(&acc->regq, &aor->params, "regq");
 
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 
 		char expr[16] = "outbound";
 
@@ -582,7 +584,6 @@ int account_alloc(struct account **accp, const char *sipaddr)
 
 	/* Decode parameters */
 	acc->ptime = 20;
-	acc->rtcp_mux = conf_config()->avt.rtcp_mux;
 	err |= sip_params_decode(acc, &acc->laddr);
 	       rel100_decode(acc, &acc->laddr.params);
 	       answermode_decode(acc, &acc->laddr.params);
@@ -700,7 +701,7 @@ int account_set_auth_pass(struct account *acc, const char *pass)
  */
 int account_set_outbound(struct account *acc, const char *ob, unsigned ix)
 {
-	if (!acc || ix >= ARRAY_SIZE(acc->outboundv))
+	if (!acc || ix >= RE_ARRAY_SIZE(acc->outboundv))
 		return EINVAL;
 
 	acc->outboundv[ix] = mem_deref(acc->outboundv[ix]);
@@ -1026,56 +1027,57 @@ int account_set_display_name(struct account *acc, const char *dname)
 
 
 /**
- * Sets MWI on (value "yes") or off (value "no")
+ * Sets MWI on (value true) or off (value false)
  *
  * @param acc      User-Agent account
- * @param value    "yes" or "no"
+ * @param value    true or false
  *
  * @return 0 if success, otherwise errorcode
  */
-int account_set_mwi(struct account *acc, const char *value)
+int account_set_mwi(struct account *acc, bool value)
 {
 	if (!acc)
 		return EINVAL;
 
-	if (0 == str_casecmp(value, "yes"))
-		acc->mwi = true;
-	else
-		if (0 == str_casecmp(value, "no"))
-			acc->mwi = false;
-		else {
-			warning("account: unknown mwi value: %r\n",
-				value);
-			return EINVAL;
-		}
+	acc->mwi = value;
 
 	return 0;
 }
 
 
 /**
- * Sets call transfer on (value "yes") or off (value "no")
+ * Sets call transfer on (value true) or off (value false)
  *
  * @param acc      User-Agent account
- * @param value    "yes" or "no"
+ * @param value    true or false
  *
  * @return 0 if success, otherwise errorcode
  */
-int account_set_call_transfer(struct account *acc, const char *value)
+int account_set_call_transfer(struct account *acc, bool value)
 {
 	if (!acc)
 		return EINVAL;
 
-	if (0 == str_casecmp(value, "yes"))
-		acc->refer = true;
-	else
-		if (0 == str_casecmp(value, "no"))
-			acc->refer = false;
-		else {
-			warning("account: unknown call transfer: %r\n",
-				value);
-			return EINVAL;
-		}
+	acc->refer = value;
+
+	return 0;
+}
+
+
+/**
+ * Sets rtcp_mux on (value true) or off (value false)
+ *
+ * @param acc      User-Agent account
+ * @param value    true or false
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int account_set_rtcp_mux(struct account *acc, bool value)
+{
+	if (!acc)
+		return EINVAL;
+
+	acc->rtcp_mux = value;
 
 	return 0;
 }
@@ -1399,7 +1401,7 @@ const char *account_auth_pass(const struct account *acc)
  */
 const char *account_outbound(const struct account *acc, unsigned ix)
 {
-	if (!acc || ix >= ARRAY_SIZE(acc->outboundv))
+	if (!acc || ix >= RE_ARRAY_SIZE(acc->outboundv))
 		return NULL;
 
 	return acc->outboundv[ix];
@@ -1681,14 +1683,14 @@ const char *account_medianat(const struct account *acc)
  *
  * @param acc User-Agent account
  *
- * @return "yes" or "no"
+ * @return true or false
  */
-const char *account_mwi(const struct account *acc)
+bool account_mwi(const struct account *acc)
 {
 	if (!acc)
-		return "no";
+		return false;
 
-	return acc->mwi ? "yes" : "no";
+	return acc->mwi;
 }
 
 
@@ -1697,14 +1699,30 @@ const char *account_mwi(const struct account *acc)
  *
  * @param acc User-Agent account
  *
- * @return "yes" or "no"
+ * @return true or false
  */
-const char *account_call_transfer(const struct account *acc)
+bool account_call_transfer(const struct account *acc)
 {
 	if (!acc)
-		return "no";
+		return false;
 
-	return acc->refer ? "yes" : "no";
+	return acc->refer;
+}
+
+
+/**
+ * Get rtcp_mux capability of an account
+ *
+ * @param acc User-Agent account
+ *
+ * @return true or false
+ */
+bool account_rtcp_mux(const struct account *acc)
+{
+	if (!acc)
+		return false;
+
+	return acc->rtcp_mux;
 }
 
 
@@ -1907,13 +1925,14 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 			  acc->mencid ? acc->mencid : "none");
 	err |= re_hprintf(pf, " medianat:     %s\n",
 			  acc->mnatid ? acc->mnatid : "none");
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 		if (acc->outboundv[i]) {
 			err |= re_hprintf(pf, " outbound%d:    %s\n",
 					  i+1, acc->outboundv[i]);
 		}
 	}
-	err |= re_hprintf(pf, " mwi:          %s\n", account_mwi(acc));
+	err |= re_hprintf(pf, " mwi:          %s\n",
+			  account_mwi(acc) ? "yes" : "no");
 	err |= re_hprintf(pf, " ptime:        %u\n", acc->ptime);
 	err |= re_hprintf(pf, " regint:       %u\n", acc->regint);
 	err |= re_hprintf(pf, " prio:         %u\n", acc->prio);
@@ -1935,7 +1954,7 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 		err |= re_hprintf(pf, "\n");
 	}
 	err |= re_hprintf(pf, " call_transfer:%s\n",
-			  account_call_transfer(acc));
+			  account_call_transfer(acc) ? "yes" : "no");
 	err |= re_hprintf(pf, " cert:         %s\n", acc->cert);
 	err |= re_hprintf(pf, " extra:        %s\n",
 			  acc->extra ? acc->extra : "none");
@@ -1978,7 +1997,7 @@ int account_json_api(struct odict *od, struct odict *odcfg,
 	}
 
 	err |= odict_alloc(&obn, 8);
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 		if (acc->outboundv[i]) {
 			err |= odict_entry_add(obn, "outbound", ODICT_STRING,
 					acc->outboundv[i]);

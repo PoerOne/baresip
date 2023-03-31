@@ -91,6 +91,7 @@ struct account {
 	char *uas_user;              /**< UAS authentication username        */
 	char *uas_pass;              /**< UAS authentication password        */
 	bool rtcp_mux;               /**< RTCP multiplexing                  */
+	bool pinhole;                /**< NAT pinhole flag                   */
 };
 
 
@@ -195,7 +196,7 @@ int  reg_json_api(struct odict *od, const struct reg *reg);
 int  reg_status(struct re_printf *pf, const struct reg *reg);
 int  reg_af(const struct reg *reg);
 const struct sa *reg_laddr(const struct reg *reg);
-
+void reg_set_custom_hdrs(struct reg *reg, const struct list *hdrs);
 
 /*
  * RTP Stats
@@ -278,6 +279,7 @@ int  stream_alloc(struct stream **sp, struct list *streaml,
 		  void *arg);
 void stream_hold(struct stream *s, bool hold);
 void stream_set_ldir(struct stream *s, enum sdp_dir dir);
+void stream_set_rtcp_interval(struct stream *s, uint32_t n);
 void stream_set_srate(struct stream *s, uint32_t srate_tx, uint32_t srate_rx);
 bool stream_is_ready(const struct stream *strm);
 int  stream_print(struct re_printf *pf, const struct stream *s);
@@ -293,16 +295,18 @@ void stream_update_encoder(struct stream *s, int pt_enc);
 int  stream_pt_enc(const struct stream *strm);
 int  stream_send(struct stream *s, bool ext, bool marker, int pt, uint32_t ts,
 		 struct mbuf *mb);
+int  stream_resend(struct stream *s, uint16_t seq, bool ext, bool marker,
+		  int pt, uint32_t ts, struct mbuf *mb);
 
 /* Receive */
 void stream_flush(struct stream *s);
-int  stream_decode(struct stream *s);
 int  stream_ssrc_rx(const struct stream *strm, uint32_t *ssrc);
 
 
 struct bundle *stream_bundle(const struct stream *strm);
 void stream_parse_mid(struct stream *strm);
 void stream_enable_bundle(struct stream *strm, enum bundle_state st);
+void stream_enable_natpinhole(struct stream *strm, bool enable);
 
 
 /*

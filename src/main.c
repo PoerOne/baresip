@@ -119,8 +119,6 @@ int main(int argc, char *argv[])
 	if (err)
 		goto out;
 
-	re_thread_async_init(ASYNC_WORKERS);
-
 	tmr_init(&tmr_quit);
 
 #ifdef HAVE_GETOPT
@@ -155,9 +153,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'e':
-			if (execmdc >= ARRAY_SIZE(execmdv)) {
+			if (execmdc >= RE_ARRAY_SIZE(execmdv)) {
 				warning("max %zu commands\n",
-					ARRAY_SIZE(execmdv));
+					RE_ARRAY_SIZE(execmdv));
 				err = EINVAL;
 				goto out;
 			}
@@ -169,9 +167,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'm':
-			if (modc >= ARRAY_SIZE(modv)) {
+			if (modc >= RE_ARRAY_SIZE(modv)) {
 				warning("max %zu modules\n",
-					ARRAY_SIZE(modv));
+					RE_ARRAY_SIZE(modv));
 				err = EINVAL;
 				goto out;
 			}
@@ -228,6 +226,8 @@ int main(int argc, char *argv[])
 		warning("main: configure failed: %m\n", err);
 		goto out;
 	}
+
+	re_thread_async_init(ASYNC_WORKERS);
 
 	/*
 	 * Set the network interface before initializing the config

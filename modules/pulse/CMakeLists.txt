@@ -1,6 +1,6 @@
 project(pulse)
 
-set(SRCS pulse.c player.c recorder.c)
+set(SRCS pulse.c pastream.c player.c recorder.c)
 
 if(STATIC)
     add_library(${PROJECT_NAME} OBJECT ${SRCS})

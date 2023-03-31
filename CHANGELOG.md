@@ -5,10 +5,166 @@ All notable changes to baresip will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 3.0.0 - 2023-03-20
+
+## What's Changed
+* ua: allow custom headers in sip REGISTER request by @Koshub in https://github.com/baresip/baresip/pull/2452
+* merge rem into re by @alfredh in https://github.com/baresip/baresip/pull/2442
+* main: fix async init order (after config load) by @sreimers in https://github.com/baresip/baresip/pull/2457
+* ci: install pkg-config on mac-os by @cspiel1 in https://github.com/baresip/baresip/pull/2459
+* ci: remove rem in sanitizers and valgrind yml by @cspiel1 in https://github.com/baresip/baresip/pull/2458
+* video: fix vidqueue_poll list_move by @sreimers in https://github.com/baresip/baresip/pull/2465
+* Dshow fixes by @tomek-o in https://github.com/baresip/baresip/pull/2467
+* Moved adding of custom headers from ua_connect_dir to ua_call_alloc by @juha-h in https://github.com/baresip/baresip/pull/2470
+* Include also params to MESSAGE URI by @juha-h in https://github.com/baresip/baresip/pull/2469
+* video: remove unused qent->dst by @sreimers in https://github.com/baresip/baresip/pull/2474
+* call: Fix delayed (auto) answer if awaiting PRACK by @maximilianfridrich in https://github.com/baresip/baresip/pull/2473
+* video: add TX thread by @sreimers in https://github.com/baresip/baresip/pull/2460
+* ccheck: add check_list_unlink check by @sreimers in https://github.com/baresip/baresip/pull/2471
+* stream: add stream_enable_tx() api by @sreimers in https://github.com/baresip/baresip/pull/2479
+* audio: align Audio TX thread name by @sreimers in https://github.com/baresip/baresip/pull/2480
+* Send event when dump file is opened by @juha-h in https://github.com/baresip/baresip/pull/2486
+* video: add NULL pointer check for vidisp by @cspiel1 in https://github.com/baresip/baresip/pull/2483
+* ua: Fix calls of ua_event() by @maximilianfridrich in https://github.com/baresip/baresip/pull/2495
+* call: Fix calls of call_event_handler by @maximilianfridrich in https://github.com/baresip/baresip/pull/2496
+
+## New Contributors
+* @Koshub made their first contribution in https://github.com/baresip/baresip/pull/2452
+* @tomek-o made their first contribution in https://github.com/baresip/baresip/pull/2467
+
+**Full Changelog**: https://github.com/baresip/baresip/compare/v2.12.0...v3.0.0
+
+---
+
+## 2.12.0 - 2023-02-15
+
+## What's Changed
+* call: default status code for rejecting incoming calls by @cspiel1 in https://github.com/baresip/baresip/pull/2409
+* dtls_srtp: enable single DTLS connection mode by @alfredh in https://github.com/baresip/baresip/pull/2411
+* ci: try to fix flaky azure mirrors by @sreimers in https://github.com/baresip/baresip/pull/2413
+* cmake/pulse: Remove pulse-simple library lookup by @robert-scheck in https://github.com/baresip/baresip/pull/2414
+* webrtc_aecm: use C11 mutex by @juha-h in https://github.com/baresip/baresip/pull/2415
+* pulse: replace obsolete string pulse_async (makes baresip PipeWire compatible) by @cspiel1 in https://github.com/baresip/baresip/pull/2412
+* vidpacket: add keyframe flag by @alfredh in https://github.com/baresip/baresip/pull/2416
+* av1: use keyframe instead of new-flag by @alfredh in https://github.com/baresip/baresip/pull/2418
+* av1: fix warnings by @alfredh in https://github.com/baresip/baresip/pull/2419
+* make rtcp interval configureable by @sreimers in https://github.com/baresip/baresip/pull/2420
+* sndio: remove deprecated module by @alfredh in https://github.com/baresip/baresip/pull/2422
+* PRACK refactoring by @maximilianfridrich in https://github.com/baresip/baresip/pull/2401
+* ci: merge build and cmake by @alfredh in https://github.com/baresip/baresip/pull/2425
+* menu: ringback/early audio handling for parallel calls by @cspiel1 in https://github.com/baresip/baresip/pull/2403
+* magic: use C99 __func__ macro by @alfredh in https://github.com/baresip/baresip/pull/2427
+* stream: remove stream_decode from internal API by @cspiel1 in https://github.com/baresip/baresip/pull/2430
+* use RE_ARRAY_SIZE() macro by @alfredh in https://github.com/baresip/baresip/pull/2429
+* cmake: link RESOLV_LIBRARY by @sreimers in https://github.com/baresip/baresip/pull/2432
+* ci/build: fix Ubuntu 22.04 workaround by @sreimers in https://github.com/baresip/baresip/pull/2435
+* avcapture: use RE_ARRAY_SIZE macro by @alfredh in https://github.com/baresip/baresip/pull/2434
+* pulse: remove obsolete doxygen note to be experimental by @cspiel1 in https://github.com/baresip/baresip/pull/2436
+* gtk: return NULL on mtx_init() != thrd_success by @robert-scheck in https://github.com/baresip/baresip/pull/2440
+* ci: add libgtk-3-dev to build GTK+ 3 module by @robert-scheck in https://github.com/baresip/baresip/pull/2441
+* event: missing class name case for RTPESTAB event by @cspiel1 in https://github.com/baresip/baresip/pull/2447
+* ci: add sanitizers by @sreimers in https://github.com/baresip/baresip/pull/2449
+* bump version numbers to 2.12.0 by @alfredh in https://github.com/baresip/baresip/pull/2453
+
+
+**Full Changelog**: https://github.com/baresip/baresip/compare/v2.11.0...v2.12.0
+
+---
+
+## 2.11.0 - 2023-01-11
+
+### What's Changed
+* uag,call: do not override status code and reason by @cspiel1 in https://github.com/baresip/baresip/pull/2345
+* stream: send RTP NAT pinhole opener until RTP is received by @cspiel1 in https://github.com/baresip/baresip/pull/2346
+* mediatrack: add audio and video getters by @sreimers in https://github.com/baresip/baresip/pull/2347
+* Added rtcp_mux related API functions by @juha-h in https://github.com/baresip/baresip/pull/2352
+* make: remove deprecated makefile by @alfredh in https://github.com/baresip/baresip/pull/2354
+* Removed rtcp_mux config variable by @juha-h in https://github.com/baresip/baresip/pull/2353
+* Use bool instead of "yes"/"no" in account API functions by @juha-h in https://github.com/baresip/baresip/pull/2355
+* aubuf: add AUBUF_FILE mode by @cspiel1 in https://github.com/baresip/baresip/pull/2363
+* play: flush aubuf before restart by @cspiel1 in https://github.com/baresip/baresip/pull/2364
+* call: avoid unwanted re-invites on ESTABLISHED event by @cspiel1 in https://github.com/baresip/baresip/pull/2362
+* avcodec: constrain bitrate by @sreimers in https://github.com/baresip/baresip/pull/2365
+* pulse: rename to pulse_simple.so by @alfredh in https://github.com/baresip/baresip/pull/2371
+* module: remove module_tmp by @alfredh in https://github.com/baresip/baresip/pull/2373
+* audio: remove unused last_sampc by @alfredh in https://github.com/baresip/baresip/pull/2372
+* audio: add rtpext_find() (refactoring) by @alfredh in https://github.com/baresip/baresip/pull/2375
+* multicast: remove ref to pthread by @alfredh in https://github.com/baresip/baresip/pull/2379
+* video: add rtcp-fb Generic NACK by @sreimers in https://github.com/baresip/baresip/pull/2380
+* call: set media dir also for MNAT case by @cspiel1 in https://github.com/baresip/baresip/pull/2382
+* pulse: rename pulse_async.so to pulse.so (default) by @alfredh in https://github.com/baresip/baresip/pull/2381
+* RTP Resend by @sreimers in https://github.com/baresip/baresip/pull/2378
+* make: remove unused srcs.mk by @alfredh in https://github.com/baresip/baresip/pull/2387
+* TLS server support SNI based certificate selection by @cspiel1 in https://github.com/baresip/baresip/pull/2330
+* audiounit: use C11 mutex by @alfredh in https://github.com/baresip/baresip/pull/2386
+* webrtc_aec: use C11 mutex by @alfredh in https://github.com/baresip/baresip/pull/2384
+* coreaudio: use C11 mutex by @alfredh in https://github.com/baresip/baresip/pull/2388
+* gtk: use C11 threads by @alfredh in https://github.com/baresip/baresip/pull/2391
+* remove pulse_simple.so -- use pulse.so by @alfredh in https://github.com/baresip/baresip/pull/2383
+* ci: rename ccheck.yml to lint.yml by @alfredh in https://github.com/baresip/baresip/pull/2394
+* fritzbox2baresip: use open with explicitly specifying an encoding by @robert-scheck in https://github.com/baresip/baresip/pull/2396
+* test: remove mock_aufilt (unused) by @alfredh in https://github.com/baresip/baresip/pull/2392
+* Ci pylint by @alfredh in https://github.com/baresip/baresip/pull/2395
+* gzrtp: use C11 mutex by @alfredh in https://github.com/baresip/baresip/pull/2393
+* C11 mutex by @mbattista in https://github.com/baresip/baresip/pull/2397
+* tls multiple server certs by @cspiel1 in https://github.com/baresip/baresip/pull/2399
+* call: return EINVAL if answer not possible by @maximilianfridrich in https://github.com/baresip/baresip/pull/2405
+* ccheck: fix some pylint warnings by @alfredh in https://github.com/baresip/baresip/pull/2398
+* Fixed account debug of mwi and call_transfer by @juha-h in https://github.com/baresip/baresip/pull/2406
+* avformat: fix printf format for samplerate and channels by @alfredh in https://github.com/baresip/baresip/pull/2407
+* cmake: increase minimum required version by @cspiel1 in https://github.com/baresip/baresip/pull/2408
+
+
+**Full Changelog**: https://github.com/baresip/baresip/compare/v2.10.0...v2.11.0
+
+---
+
+## [2.10.0] - 2022-12-06
+
+### What's Changed
+* sdl: small improvements by @sreimers in https://github.com/baresip/baresip/pull/2285
+* vidinfo: allow all pixel formats by @alfredh in https://github.com/baresip/baresip/pull/2291
+* vid: add support for YUV422P pixel format by @alfredh in https://github.com/baresip/baresip/pull/2280
+* avformat: fix hwaccel vaapi by @alfredh in https://github.com/baresip/baresip/pull/2299
+* mk: add deprecate notice by @alfredh in https://github.com/baresip/baresip/pull/2302
+* mingw: upgrade to OpenSSL 3.0.7 by @alfredh in https://github.com/baresip/baresip/pull/2303
+* dshow: fix some warnings by @alfredh in https://github.com/baresip/baresip/pull/2305
+* dshow: fix pragma warning by @alfredh in https://github.com/baresip/baresip/pull/2306
+* ci: install libsdl2 development package by @alfredh in https://github.com/baresip/baresip/pull/2307
+* sdl: work in progress fixes for multi-threading by @alfredh in https://github.com/baresip/baresip/pull/2300
+* Stop segfaulting when no URI is passed to dial command by @SimonHyde-BBC in https://github.com/baresip/baresip/pull/2311
+* ice: local candidate policy config by @sreimers in https://github.com/baresip/baresip/pull/2312
+* auresamp: check handler arguments by @alfredh in https://github.com/baresip/baresip/pull/2313
+* fixes 2315 and GTK errors on quit by @mbattista in https://github.com/baresip/baresip/pull/2316
+* auresamp: avoid division by zero (#2293) by @cspiel1 in https://github.com/baresip/baresip/pull/2317
+* cmake: check for XShm.h (#2318) by @cspiel1 in https://github.com/baresip/baresip/pull/2319
+* pulse_async: avoid integer overrun for timestamps in recorder by @cspiel1 in https://github.com/baresip/baresip/pull/2321
+* ua: use sdp connection data instead origin by @sreimers in https://github.com/baresip/baresip/pull/2298
+* rtpext: move from baresip to re by @alfredh in https://github.com/baresip/baresip/pull/2322
+* acc,stream: add rtcp_mux account param by @sreimers in https://github.com/baresip/baresip/pull/2320
+* video: video_update cleanup by @sreimers in https://github.com/baresip/baresip/pull/2324
+* aufile/src: add auframe support by @sreimers in https://github.com/baresip/baresip/pull/2325
+* ice/tmr_async_handler: fix possible segfault by @sreimers in https://github.com/baresip/baresip/pull/2326
+* webrtc: fix browser offer handling by @sreimers in https://github.com/baresip/baresip/pull/2327
+* Space at the beginning of sip: creates errors by @mbattista in https://github.com/baresip/baresip/pull/2329
+* opus_multistream: update mimetype to ad-hoc standard by @alfredh in https://github.com/baresip/baresip/pull/2328
+* webrtc: add offerer and recvonly options by @sreimers in https://github.com/baresip/baresip/pull/2331
+* test: replace RSA cert with EC cert by @alfredh in https://github.com/baresip/baresip/pull/2332
+* Add OPTIONS handling for webrtc demo by @RenSym in https://github.com/baresip/baresip/pull/2333
+* mk: remove rtpext.c from srcs.mk by @cspiel1 in https://github.com/baresip/baresip/pull/2336
+* ua: change refer log to info() by @alfredh in https://github.com/baresip/baresip/pull/2338
+
+### New Contributors
+* @SimonHyde-BBC made their first contribution in https://github.com/baresip/baresip/pull/2311
+* @RenSym made their first contribution in https://github.com/baresip/baresip/pull/2333
+
+**Full Changelog**: https://github.com/baresip/baresip/compare/v2.9.0...v2.10.0
+
+---
 
 ## [2.9.0] - 2022-11-01
 
-## What's Changed
+### What's Changed
 * sndfile Module - filename includes strm->cname (i.e. call->local_uri)~ by @ninp0 in https://github.com/baresip/baresip/pull/2165
 * log: optional timestamps by @cspiel1 in https://github.com/baresip/baresip/pull/2169
 * avcodec: remove H263 codec by @alfredh in https://github.com/baresip/baresip/pull/2182

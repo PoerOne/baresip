@@ -1,4 +1,4 @@
-name: valgrind leak check
+name: Sanitizers
 
 on:
   push:
@@ -9,8 +9,19 @@ on:
     - main
 
 jobs:
-  valgrind:
-    runs-on: ubuntu-latest 
+  sanitizers:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        sanitizer: [thread, address, undefined]
+
+    env:
+      CC: clang
+      CMAKE_GENERATOR: Ninja
+      CXXFLAGS: "-fsanitize=${{ matrix.sanitizer }}"
+      CFLAGS: "-fsanitize=${{ matrix.sanitizer }}"
+      ASAN_OPTIONS: fast_unwind_on_malloc=0
 
     steps:
     - uses: actions/checkout@v3
@@ -22,7 +33,7 @@ jobs:
     
     - name: install packages
       run: |
-        sudo apt-get update && sudo apt-get install -y libssl-dev valgrind
+        sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
    
     - uses: sreimers/pr-dependency-action@v0.5
       with:
@@ -32,7 +43,7 @@ jobs:
 
     - name: make re
       run: |
-        cmake -S re -B re/build
+        cmake -S re -B re/build -DHAVE_THREADS=
         cmake --build re/build -j
         mv re ../.
     
@@ -40,7 +51,7 @@ jobs:
       run: sudo ldconfig
 
     - name: make baresip selftest
-      run: cmake -B build -DSTATIC=1 -DMODULES="g711;ausine;fakevideo;auconv;dtls_srtp;srtp;aufile" && cmake --build build -j
+      run: cmake -B build -DHAVE_THREADS= -DSTATIC=1 -DMODULES="g711;ausine;fakevideo;auconv;dtls_srtp;srtp;aufile" && cmake --build build -j
 
-    - name: valgrind test
-      run: valgrind --leak-check=full --show-reachable=yes --error-exitcode=42 ./build/test/selftest
+    - name: run selftest
+      run: ./build/test/selftest

@@ -133,7 +133,7 @@ struct autx {
  \endverbatim
  */
 struct aurx {
-	const struct auplay *ap;
+	const struct auplay *ap;      /**< Audio Player module             */
 	struct auplay_st *auplay;     /**< Audio Player                    */
 	struct auplay_prm auplay_prm; /**< Audio Player parameters         */
 	const struct aucodec *ac;     /**< Current audio decoder           */
@@ -155,8 +155,6 @@ struct aurx {
 	enum aufmt play_fmt;          /**< Sample format for audio playback*/
 	enum aufmt dec_fmt;           /**< Sample format for decoder       */
 	struct timestamp_recv ts_recv;/**< Receive timestamp state         */
-
-	size_t last_sampc;
 
 	struct {
 		uint64_t aubuf_overrun;
@@ -870,8 +868,6 @@ static int aurx_stream_decode(struct aurx *rx, const struct rtp_header *hdr,
 				ac->name, mbuf_get_left(mb), err);
 			goto out;
 		}
-
-		rx->last_sampc = sampc;
 	}
 	else {
 		/* no PLC in the codec, might be done in filters below */
@@ -902,6 +898,21 @@ static int aurx_stream_decode(struct aurx *rx, const struct rtp_header *hdr,
 }
 
 
+/* RFC 5285 -- A General Mechanism for RTP Header Extensions */
+static const struct rtpext *rtpext_find(const struct rtpext *extv, size_t extc,
+					uint8_t id)
+{
+	for (size_t i=0; i<extc; i++) {
+		const struct rtpext *rtpext = &extv[i];
+
+		if (rtpext->id == id)
+			return rtpext;
+	}
+
+	return NULL;
+}
+
+
 /* Handle incoming stream data from the network */
 static void stream_recv_handler(const struct rtp_header *hdr,
 				struct rtpext *extv, size_t extc,
@@ -912,7 +923,6 @@ static void stream_recv_handler(const struct rtp_header *hdr,
 	struct aurx *rx = &a->rx;
 	bool discard = false;
 	bool drop = *ignore;
-	size_t i;
 	int wrap;
 	(void) lostc;
 
@@ -927,14 +937,12 @@ static void stream_recv_handler(const struct rtp_header *hdr,
 	}
 
 	*ignore = false;
+
 	/* RFC 5285 -- A General Mechanism for RTP Header Extensions */
-	for (i=0; i<extc; i++) {
-
-		if (extv[i].id == a->extmap_aulevel) {
-
-			a->rx.level_last = -(double)(extv[i].data[0] & 0x7f);
-			a->rx.level_set = true;
-		}
+	const struct rtpext *ext = rtpext_find(extv, extc, a->extmap_aulevel);
+	if (ext) {
+		rx->level_last = -(double)(ext->data[0] & 0x7f);
+		rx->level_set = true;
 	}
 
 	/* Save timestamp for incoming RTP packets */
@@ -1583,7 +1591,7 @@ static int start_source(struct autx *tx, struct audio *a, struct list *ausrcl)
 			if (!re_atomic_rlx(&tx->thr.run)) {
 				re_atomic_rlx_set(&tx->thr.run, true);
 				err = thread_create_name(&tx->thr.tid,
-							 "Audio Source",
+							 "Audio TX",
 							 tx_thread, a);
 				if (err) {
 					re_atomic_rlx_set(&tx->thr.run,
@@ -1617,12 +1625,16 @@ static int start_source(struct autx *tx, struct audio *a, struct list *ausrcl)
 int audio_start(struct audio *a)
 {
 	struct list *aufiltl = baresip_aufiltl();
-	int err;
+	const struct sdp_media *m;
+	enum sdp_dir dir;
+	int err = 0;
 
 	if (!a)
 		return EINVAL;
 
 	debug("audio: start\n");
+	m = stream_sdpmedia(audio_strm(a));
+	dir = sdp_media_dir(m);
 
 	/* Audio filter */
 	if (!list_isempty(aufiltl)) {
@@ -1632,10 +1644,15 @@ int audio_start(struct audio *a)
 			return err;
 	}
 
-	err  = start_player(&a->rx, a, baresip_auplayl());
-	err |= start_source(&a->tx, a, baresip_ausrcl());
-	if (err)
+	if (dir & SDP_RECVONLY)
+		err |= start_player(&a->rx, a, baresip_auplayl());
+
+	if (dir & SDP_SENDONLY)
+		err |= start_source(&a->tx, a, baresip_ausrcl());
+	if (err) {
+		warning("audio: start error (%m)\n", err);
 		return err;
+	}
 
 	if (a->tx.ac && a->rx.ac) {
 

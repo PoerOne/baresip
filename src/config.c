@@ -74,6 +74,8 @@ static struct config core_config = {
 		"", "",
 		640, 480,
 		1000000,
+		0,
+		0,
 		30,
 		true,
 		VID_FMT_YUV420P,
@@ -117,7 +119,7 @@ static int range_print(struct re_printf *pf, const struct range *rng)
 static int dns_handler(const struct pl *pl, void *arg, bool fallback)
 {
 	struct config_net *cfg = arg;
-	const size_t max_count = ARRAY_SIZE(cfg->nsv);
+	const size_t max_count = RE_ARRAY_SIZE(cfg->nsv);
 	int err;
 
 	if (cfg->nsc >= max_count) {
@@ -283,6 +285,17 @@ static int sip_transports_print(struct re_printf *pf, uint32_t *mask)
 }
 
 
+static const char *net_af_str(int af)
+{
+	if (af == AF_INET)
+		return "ipv4";
+	else if (af == AF_INET6)
+		return "ipv6";
+	else
+		return "unspecified";
+}
+
+
 /**
  * Parse the core configuration file and update baresip core config
  *
@@ -419,6 +432,8 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		cfg->video.height = size.h;
 	}
 	(void)conf_get_u32(conf, "video_bitrate", &cfg->video.bitrate);
+	(void)conf_get_u32(conf, "video_sendrate", &cfg->video.send_bitrate);
+	(void)conf_get_u32(conf, "video_burst_bits", &cfg->video.burst_bits);
 	(void)conf_get_float(conf, "video_fps", &cfg->video.fps);
 	(void)conf_get_bool(conf, "video_fullscreen", &cfg->video.fullscreen);
 
@@ -436,7 +451,6 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		cfg->avt.rtp_bw.max *= 1000;
 	}
 
-	(void)conf_get_bool(conf, "rtcp_mux", &cfg->avt.rtcp_mux);
 	if (0 == conf_get(conf, "jitter_buffer_type", &jbtype))
 		cfg->avt.jbtype = conf_get_jbuf_type(&jbtype);
 
@@ -459,6 +473,15 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 			    &cfg->net.use_getaddrinfo);
 	(void)conf_get_str(conf, "net_interface",
 			   cfg->net.ifname, sizeof(cfg->net.ifname));
+	if (0 == conf_get(conf, "net_af", &pl)) {
+		if (0 == pl_strcasecmp(&pl, "ipv4"))
+			cfg->net.af = AF_INET;
+		else if (0 == pl_strcasecmp(&pl, "ipv6"))
+			cfg->net.af = AF_INET6;
+		else {
+			warning("unsupported af (%r)\n", &pl);
+		}
+	}
 
 	return err;
 }
@@ -531,7 +554,6 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "rtp_video_tos\t\t%u\n"
 			 "rtp_ports\t\t%H\n"
 			 "rtp_bandwidth\t\t%H\n"
-			 "rtcp_mux\t\t%s\n"
 			 "jitter_buffer_type\t%s\n"
 			 "jitter_buffer_delay\t%H\n"
 			 "rtp_stats\t\t%s\n"
@@ -539,6 +561,7 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "\n"
 			 "# Network\n"
 			 "net_interface\t\t%s\n"
+			 "net_af\t\t\t%s\n"
 			 "\n"
 			 ,
 
@@ -582,13 +605,13 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->avt.rtpv_tos,
 			 range_print, &cfg->avt.rtp_ports,
 			 range_print, &cfg->avt.rtp_bw,
-			 cfg->avt.rtcp_mux ? "yes" : "no",
 			 jbuf_type_str(cfg->avt.jbtype),
 			 range_print, &cfg->avt.jbuf_del,
 			 cfg->avt.rtp_stats ? "yes" : "no",
 			 cfg->avt.rtp_timeout,
 
-			 cfg->net.ifname
+			 cfg->net.ifname,
+			 net_af_str(cfg->net.af)
 		   );
 
 	return err;
@@ -622,8 +645,6 @@ static const char *default_audio_device(void)
 	#endif
 #elif defined (FREEBSD)
 	return "alsa,default";
-#elif defined (OPENBSD)
-	return "sndio,default";
 #elif defined (WIN32)
 	return "winwave,nil";
 #else
@@ -779,7 +800,6 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "rtp_video_tos\t\t136\n"
 			  "#rtp_ports\t\t10000-20000\n"
 			  "#rtp_bandwidth\t\t512-1024 # [kbit/s]\n"
-			  "rtcp_mux\t\tno\n"
 			  "jitter_buffer_type\tfixed\t\t# off, fixed,"
 				" adaptive\n"
 			  "jitter_buffer_delay\t%u-%u\t\t# frames\n"
@@ -852,7 +872,7 @@ static const char *detect_module_path(bool *valid)
 	uint32_t nmax = 0;
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(pathv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(pathv); i++) {
 
 		uint32_t n = count_modules(pathv[i]);
 
@@ -978,8 +998,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	#endif
 #elif defined (FREEBSD)
 	(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
-#elif defined (OPENBSD)
-	(void)re_fprintf(f, "module\t\t\t" "sndio" MOD_EXT "\n");
 #elif defined (WIN32)
 	(void)re_fprintf(f, "module\t\t\t" "winwave" MOD_EXT "\n");
 #else
@@ -989,7 +1007,7 @@ int config_write_template(const char *file, const struct config *cfg)
 	}
 	else {
 		(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
-		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT "\n");
+		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT"\n");
 	}
 #endif
 	(void)re_fprintf(f, "#module\t\t\t" "jack" MOD_EXT "\n");
@@ -1153,6 +1171,7 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#busy_aufile\t\tbusy.wav\n"
 			"#error_aufile\t\terror.wav\n"
 			"#sip_autoanswer_aufile\tautoanswer.wav\n"
+			"#menu_max_earlyaudio\t32\n"
 			);
 
 	(void)re_fprintf(f,

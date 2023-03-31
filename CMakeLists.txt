@@ -10,15 +10,15 @@
 # Versioning
 #
 
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.13)
 
-project(baresip VERSION 2.9.0)
+project(baresip VERSION 3.0.0)
 
-set(PROJECT_SOVERSION 1) # bump if ABI breaks
+set(PROJECT_SOVERSION 5) # bump if ABI breaks
 
 # Pre-release identifier, comment out on a release
 # Increment for breaking changes (dev2, dev3...)
-set(PROJECT_VERSION_PRE dev)
+#set(PROJECT_VERSION_PRE dev)
 
 if(PROJECT_VERSION_PRE)
   set(PROJECT_VERSION_FULL ${PROJECT_VERSION}-${PROJECT_VERSION_PRE})
@@ -36,7 +36,6 @@ list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 include(GNUInstallDirs)
 include(CheckIncludeFile)
 find_package(RE REQUIRED)
-find_package(REM REQUIRED)
 
 ##############################################################################
 #
@@ -102,13 +101,9 @@ add_definitions(${RE_DEFINITIONS})
 include_directories(
   include
   src
-  /usr/local/include
   ${RE_INCLUDE_DIRS}
-  ${REM_INCLUDE_DIRS}
   ${OPENSSL_INCLUDE_DIR}
 )
-
-link_directories(/usr/local/lib)
 
 if(MOD_PATH)
   add_definitions(-DMOD_PATH="${MOD_PATH}")
@@ -237,7 +232,7 @@ endif()
 # Main target library
 #
 
-set(LINKLIBS ${REM_LIBRARIES} ${RE_LIBRARIES} Threads::Threads)
+set(LINKLIBS ${RE_LIBRARIES} Threads::Threads)
 
 if(ZLIB_FOUND)
   list(APPEND LINKLIBS ZLIB::ZLIB)
@@ -251,7 +246,7 @@ if(WIN32)
   list(APPEND LINKLIBS ws2_32 iphlpapi winmm gdi32 crypt32 strmiids
       ole32 oleaut32 qwave)
 else()
-  list(APPEND LINKLIBS -lm)
+  list(APPEND LINKLIBS -lm ${RESOLV_LIBRARY})
 endif()
 
 if(STATIC)

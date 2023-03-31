@@ -13,7 +13,7 @@ extern "C" {
 
 
 /** Defines the Baresip version string */
-#define BARESIP_VERSION "2.9.0"
+#define BARESIP_VERSION "3.0.0"
 
 
 #ifndef NET_MAX_NS
@@ -96,8 +96,9 @@ int account_set_mediaenc(struct account *acc, const char *mediaenc);
 int account_set_medianat(struct account *acc, const char *medianat);
 int account_set_audio_codecs(struct account *acc, const char *codecs);
 int account_set_video_codecs(struct account *acc, const char *codecs);
-int account_set_mwi(struct account *acc, const char *value);
-int account_set_call_transfer(struct account *acc, const char *value);
+int account_set_mwi(struct account *acc, bool value);
+int account_set_call_transfer(struct account *acc, bool value);
+int account_set_rtcp_mux(struct account *acc, bool value);
 int account_auth(const struct account *acc, char **username, char **password,
 		 const char *realm);
 struct list *account_aucodecl(const struct account *acc);
@@ -125,8 +126,9 @@ const struct stun_uri *account_stun_uri(const struct account *acc);
 uint16_t account_stun_port(const struct account *acc);
 const char *account_mediaenc(const struct account *acc);
 const char *account_medianat(const struct account *acc);
-const char *account_mwi(const struct account *acc);
-const char *account_call_transfer(const struct account *acc);
+bool account_mwi(const struct account *acc);
+bool account_call_transfer(const struct account *acc);
+bool account_rtcp_mux(const struct account *acc);
 const char *account_extra(const struct account *acc);
 int account_uri_complete_strdup(const struct account *acc, char **strp,
 				const struct pl *uri);
@@ -201,12 +203,13 @@ int  call_progress(struct call *call);
 void call_hangup(struct call *call, uint16_t scode, const char *reason);
 int  call_modify(struct call *call);
 int  call_hold(struct call *call, bool hold);
+void call_set_audio_ldir(struct call *call, enum sdp_dir dir);
 int  call_set_video_dir(struct call *call, enum sdp_dir dir);
 int  call_send_digit(struct call *call, char key);
 bool call_has_audio(const struct call *call);
 bool call_has_video(const struct call *call);
 bool call_early_video_available(const struct call *call);
-bool call_target_refresh_allowed(const struct call *call);
+bool call_refresh_allowed(const struct call *call);
 int  call_transfer(struct call *call, const char *uri);
 int  call_replace_transfer(struct call *target_call, struct call *source_call);
 int  call_status(struct re_printf *pf, const struct call *call);
@@ -363,6 +366,8 @@ struct config_video {
 	char disp_dev[128];     /**< Video display device           */
 	unsigned width, height; /**< Video resolution               */
 	uint32_t bitrate;       /**< Encoder bitrate in [bit/s]     */
+	uint32_t send_bitrate;  /**< Sender bitrate in [bit/s]      */
+	uint32_t burst_bits;    /**< Number of Burst bits           */
 	double fps;             /**< Video framerate                */
 	bool fullscreen;        /**< Enable fullscreen display      */
 	int enc_fmt;            /**< Encoder pixelfmt (enum vidfmt) */
@@ -1016,6 +1021,7 @@ struct vidpacket {
 	uint8_t *buf;        /**< Buffer memory                     */
 	size_t size;         /**< Size of buffer                    */
 	uint64_t timestamp;  /**< Timestamp in VIDEO_TIMEBASE units */
+	bool keyframe;       /**< True=keyframe, False=deltaframe   */
 };
 
 /* Declare function pointer */
@@ -1411,7 +1417,8 @@ bool stream_is_secure(const struct stream *strm);
 int  stream_start_mediaenc(struct stream *strm);
 int  stream_start_rtcp(const struct stream *strm);
 int  stream_enable(struct stream *strm, bool enable);
-int stream_open_natpinhole(const struct stream *strm);
+int  stream_enable_tx(struct stream *strm, bool enable);
+int stream_open_natpinhole(struct stream *strm);
 void stream_mnat_attr(struct stream *strm, const char *name,
 		      const char *value);
 void stream_set_session_handlers(struct stream *strm,
@@ -1641,6 +1648,8 @@ int  mediatrack_start_audio(struct media_track *media,
 			    struct list *ausrcl, struct list *aufiltl);
 int  mediatrack_start_video(struct media_track *media);
 struct stream *media_get_stream(const struct media_track *media);
+struct audio *media_get_audio(const struct media_track *media);
+struct video *media_get_video(const struct media_track *media);
 enum media_kind mediatrack_kind(const struct media_track *media);
 const char *media_kind_name(enum media_kind kind);
 

@@ -255,7 +255,7 @@ static bool uri_host_local(const struct uri *uri)
 	if (!uri)
 		return false;
 
-	for (i=0; i<ARRAY_SIZE(hostv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(hostv); i++) {
 
 		if (!pl_strcmp(&uri->host, hostv[i]))
 			return true;
@@ -273,18 +273,37 @@ static bool uri_host_local(const struct uri *uri)
 
 
 #ifdef USE_TLS
-static int add_transp_clientcert(void)
+static int add_account_certs(void)
 {
 	struct le *le;
+	char *host;
 	int err = 0;
 
 	for (le = list_head(&uag.ual); le; le = le->next) {
 		struct account *acc = ua_account(le->data);
+		struct uri *luri;
 		if (acc->cert) {
 			err = sip_transp_add_ccert(uag.sip,
 					&acc->laddr.uri, acc->cert);
 			if (err) {
 				warning("uag: SIP/TLS add client "
+					"certificate %s failed: %m\n",
+					acc->cert, err);
+				return err;
+			}
+
+			host = NULL;
+			luri = account_luri(acc);
+			if (luri) {
+				err = pl_strdup(&host, &luri->host);
+				if (err)
+					return err;
+			}
+
+			err = tls_add_certf(uag.tls, acc->cert, host);
+			mem_deref(host);
+			if (err) {
+				warning("uag: SIP/TLS add server "
 					"certificate %s failed: %m\n",
 					acc->cert, err);
 				return err;
@@ -392,7 +411,7 @@ static int uag_transp_add(const struct sa *laddr)
 			return err;
 		}
 
-		err = add_transp_clientcert();
+		err = add_account_certs();
 		if (err)
 			return err;
 	}
@@ -732,8 +751,8 @@ int uag_reset_transp(bool reg, bool reinvite)
 				continue;
 
 			if (sa_isset(&laddr, SA_ADDR)) {
-				if (!call_target_refresh_allowed(call)) {
-					call_hangup(call, 0, "Transport of "
+				if (!call_refresh_allowed(call)) {
+					call_hangup(call, 500, "Transport of "
 						    "User Agent changed");
 					ua_event(ua, UA_EVENT_CALL_CLOSED,
 						 call, "Transport of "

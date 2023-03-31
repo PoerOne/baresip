@@ -87,9 +87,9 @@ static void add_extension(struct ua *ua, const char *extension)
 {
 	struct pl e;
 
-	if (ua->extensionc >= ARRAY_SIZE(ua->extensionv)) {
+	if (ua->extensionc >= RE_ARRAY_SIZE(ua->extensionv)) {
 		warning("ua: maximum %zu number of SIP extensions\n",
-			ARRAY_SIZE(ua->extensionv));
+			RE_ARRAY_SIZE(ua->extensionv));
 		return;
 	}
 
@@ -121,7 +121,7 @@ static int create_register_clients(struct ua *ua)
 			goto out;
 		}
 
-		for (i=0; i<ARRAY_SIZE(ua->acc->outboundv); i++) {
+		for (i=0; i<RE_ARRAY_SIZE(ua->acc->outboundv); i++) {
 
 			if (ua->acc->outboundv[i] && ua->acc->regint) {
 				err = reg_add(&ua->regl, ua, (int)i+1);
@@ -204,6 +204,9 @@ static int start_register(struct ua *ua, bool fallback)
 
 	for (le = ua->regl.head, i=0; le; le = le->next, i++) {
 		struct reg *reg = le->data;
+
+		if (!list_isempty(&ua->custom_hdrs))
+			reg_set_custom_hdrs(reg, &ua->custom_hdrs);
 
 		err = reg_register(reg, reg_uri, params,
 				   fallback ? 0 : acc->regint,
@@ -502,12 +505,12 @@ static void call_event_handler(struct call *call, enum call_event ev,
 
 			info("ua: blocked access: \"%s\"\n", peeruri);
 
-			ua_event(ua, UA_EVENT_CALL_CLOSED, call, str);
+			ua_event(ua, UA_EVENT_CALL_CLOSED, call, "%s", str);
 			mem_deref(call);
 			break;
 		}
 
-		ua_event(ua, UA_EVENT_CALL_INCOMING, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_INCOMING, call, "%s", peeruri);
 		switch (ua->acc->answermode) {
 
 		case ANSWERMODE_EARLY:
@@ -531,43 +534,43 @@ static void call_event_handler(struct call *call, enum call_event ev,
 		break;
 
 	case CALL_EVENT_RINGING:
-		ua_event(ua, UA_EVENT_CALL_RINGING, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_RINGING, call, "%s", peeruri);
 		break;
 
 	case CALL_EVENT_OUTGOING:
-		ua_event(ua, UA_EVENT_CALL_OUTGOING, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_OUTGOING, call, "%s", peeruri);
 		break;
 
 	case CALL_EVENT_PROGRESS:
 		ua_printf(ua, "Call in-progress: %s\n", peeruri);
-		ua_event(ua, UA_EVENT_CALL_PROGRESS, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_PROGRESS, call, "%s", peeruri);
 		break;
 
 	case CALL_EVENT_ANSWERED:
 		ua_printf(ua, "Call answered: %s\n", peeruri);
-		ua_event(ua, UA_EVENT_CALL_ANSWERED, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_ANSWERED, call, "%s", peeruri);
 		break;
 
 	case CALL_EVENT_ESTABLISHED:
 		ua_printf(ua, "Call established: %s\n", peeruri);
-		ua_event(ua, UA_EVENT_CALL_ESTABLISHED, call, peeruri);
+		ua_event(ua, UA_EVENT_CALL_ESTABLISHED, call, "%s", peeruri);
 		break;
 
 	case CALL_EVENT_CLOSED:
-		ua_event(ua, UA_EVENT_CALL_CLOSED, call, str);
+		ua_event(ua, UA_EVENT_CALL_CLOSED, call, "%s", str);
 		mem_deref(call);
 		break;
 
 	case CALL_EVENT_TRANSFER:
-		ua_event(ua, UA_EVENT_CALL_TRANSFER, call, str);
+		ua_event(ua, UA_EVENT_CALL_TRANSFER, call, "%s", str);
 		break;
 
 	case CALL_EVENT_TRANSFER_FAILED:
-		ua_event(ua, UA_EVENT_CALL_TRANSFER_FAILED, call, str);
+		ua_event(ua, UA_EVENT_CALL_TRANSFER_FAILED, call, "%s", str);
 		break;
 
 	case CALL_EVENT_MENC:
-		ua_event(ua, UA_EVENT_CALL_MENC, call, str);
+		ua_event(ua, UA_EVENT_CALL_MENC, call, "%s", str);
 		break;
 	}
 }
@@ -585,7 +588,7 @@ static void call_dtmf_handler(struct call *call, char key, void *arg)
 		key_str[0] = key;
 		key_str[1] = '\0';
 
-		ua_event(ua, UA_EVENT_CALL_DTMF_START, call, key_str);
+		ua_event(ua, UA_EVENT_CALL_DTMF_START, call, "%s", key_str);
 	}
 	else {
 		ua_event(ua, UA_EVENT_CALL_DTMF_END, call, NULL);
@@ -872,6 +875,9 @@ int ua_call_alloc(struct call **callp, struct ua *ua,
 	if (err)
 		return err;
 
+	if (!list_isempty(&ua->custom_hdrs))
+		call_set_custom_hdrs(*callp, &ua->custom_hdrs);
+
 	call_set_handlers(*callp, NULL, call_dtmf_handler, ua);
 
 	return 0;
@@ -1028,7 +1034,7 @@ bool ua_handle_refer(struct ua *ua, const struct sip_msg *msg)
 
 	break;
 	default:
-		warning("ua: REFER forbidden for %s\n", auth.realm);
+		info("ua: REFER forbidden for %s\n", auth.realm);
 		(void)sip_reply(uag_sip(), msg, 403, "Forbidden");
 		goto out;
 	break;
@@ -1066,7 +1072,9 @@ static const char *autoans_header_name(enum answer_method met)
 int ua_alloc(struct ua **uap, const char *aor)
 {
 	struct ua *ua;
+	struct uri *luri;
 	char *buf = NULL;
+	char *host = NULL;
 	int err;
 
 	if (!aor)
@@ -1126,6 +1134,20 @@ int ua_alloc(struct ua **uap, const char *aor)
 			return err;
 		}
 
+		luri = account_luri(ua->acc);
+		if (luri) {
+			err = pl_strdup(&host, &luri->host);
+			if (err)
+				goto out;
+		}
+
+		err = tls_add_certf(uag_tls(), ua->acc->cert, host);
+		if (err) {
+			warning("uag: SIP/TLS add server "
+				"certificate %s failed: %m\n",
+				ua->acc->cert, err);
+			goto out;
+		}
 	}
 
 	err = create_register_clients(ua);
@@ -1134,9 +1156,10 @@ int ua_alloc(struct ua **uap, const char *aor)
 
 	add_extension(ua, "norefersub");
 	list_append(uag_list(), &ua->le, ua);
-	ua_event(ua, UA_EVENT_CREATE, NULL, aor);
+	ua_event(ua, UA_EVENT_CREATE, NULL, "%s", aor);
 
  out:
+	mem_deref(host);
 	mem_deref(buf);
 	if (err)
 		mem_deref(ua);
@@ -1267,9 +1290,6 @@ int ua_connect_dir(struct ua *ua, struct call **callp,
 	err = ua_call_alloc(&call, ua, vmode, NULL, NULL, from_uri, true);
 	if (err)
 		goto out;
-
-	if (!list_isempty(&ua->custom_hdrs))
-		call_set_custom_hdrs(call, &ua->custom_hdrs);
 
 	if (adir != SDP_SENDRECV || vdir != SDP_SENDRECV) {
 		err = call_set_media_direction(call, adir, vdir);
@@ -1962,13 +1982,15 @@ int ua_rm_custom_hdr(struct ua *ua, struct pl *name)
 	if (!ua)
 		return EINVAL;
 
-	LIST_FOREACH(&ua->custom_hdrs, le) {
+	le = list_head(&ua->custom_hdrs);
+	while (le) {
 		struct sip_hdr *h = le->data;
-		if (!pl_cmp(&h->name, name)) {
-			list_unlink(le);
-			mem_deref(h);
+		le = le->next;
 
-			return 0;
+		if (!pl_cmp(&h->name, name)) {
+			list_unlink(&h->le);
+			mem_deref(h);
+			break;
 		}
 	}
 
