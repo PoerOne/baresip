@@ -52,10 +52,10 @@ static int net_dns_srv_add(struct network *net, const struct sa *sa,
 	if (!net)
 		return EINVAL;
 
-	if (!fallback && net->nsn >= ARRAY_SIZE(net->nsv))
+	if (!fallback && net->nsn >= RE_ARRAY_SIZE(net->nsv))
 		return E2BIG;
 
-	if (fallback && net->nsnf >= ARRAY_SIZE(net->nsvf))
+	if (fallback && net->nsnf >= RE_ARRAY_SIZE(net->nsvf))
 		return E2BIG;
 
 	if (fallback)
@@ -71,7 +71,7 @@ static int net_dns_srv_get(const struct network *net,
 			   struct sa *srvv, uint32_t *n, bool *from_sys)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t i, nsn = ARRAY_SIZE(nsv);
+	uint32_t i, nsn = RE_ARRAY_SIZE(nsv);
 	uint32_t offset;
 	uint32_t limit = *n;
 	int err;
@@ -137,7 +137,7 @@ void net_dns_refresh(struct network *net)
 	uint32_t nsn;
 	int err;
 
-	nsn = ARRAY_SIZE(nsv);
+	nsn = RE_ARRAY_SIZE(nsv);
 
 	err = net_dns_srv_get(net, nsv, &nsn, NULL);
 	if (err)
@@ -174,7 +174,7 @@ bool net_af_enabled(const struct network *net, int af)
 static int dns_init(struct network *net)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t nsn = ARRAY_SIZE(nsv);
+	uint32_t nsn = RE_ARRAY_SIZE(nsv);
 	int err;
 
 	err = net_dns_srv_get(net, nsv, &nsn, NULL);
@@ -199,8 +199,9 @@ static bool check_ipv6(void)
 /**
  * Add a local IP address with given interface name
  *
- * @param net  Network instance
- * @param ip   IP address
+ * @param net    Network instance
+ * @param sa     IP address
+ * @param ifname Interface name
  *
  * @return 0 if success, otherwise errorcode
  */
@@ -258,10 +259,14 @@ static bool if_debug_handler(const char *ifname, const struct sa *sa,
 	void **argv = arg;
 	struct re_printf *pf = argv[0];
 	struct network *net = argv[1];
+	bool def;
 	int err = 0;
 
+	def = sa_cmp(net_laddr_af(baresip_network(), sa_af(sa)), sa, SA_ADDR);
+
 	if (net_af_enabled(net, sa_af(sa)))
-		err = re_hprintf(pf, " %10s:  %j\n", ifname, sa);
+		err = re_hprintf(pf, " %10s:  %j %s\n", ifname, sa,
+				 def ? "(default)" : "");
 
 	return err != 0;
 }
@@ -294,15 +299,19 @@ static const struct sa *find_laddr_af(const struct network *net, int af,
 {
 	struct le *le;
 	struct sa dst;
+	int err;
 
 	if (!net)
 		return NULL;
 
 	sa_init(&dst, af);
 	if (af == AF_INET6)
-		sa_set_str(&dst, "1::1", 53);
+		err = sa_set_str(&dst, "1::1", 53);
 	else
-		sa_set_str(&dst, "1.1.1.1", 53);
+		err = sa_set_str(&dst, "1.1.1.1", 53);
+
+	if (err)
+		return NULL;
 
 	LIST_FOREACH(&net->laddrs, le) {
 		struct laddr *laddr = le->data;
@@ -404,6 +413,11 @@ int net_alloc(struct network **netp, const struct config_net *cfg)
 		goto out;
 	}
 
+	if (cfg->use_getaddrinfo)
+		dnsc_getaddrinfo(net->dnsc, true);
+	else
+		dnsc_getaddrinfo(net->dnsc, false);
+
 	net_if_apply(add_laddr_filter, net);
 	info("Local network addresses:\n");
 	if (!list_count(&net->laddrs))
@@ -438,7 +452,7 @@ int net_use_nameserver(struct network *net, const struct sa *srvv, size_t srvc)
 	if (!net)
 		return EINVAL;
 
-	net->nsn = (uint32_t)min(ARRAY_SIZE(net->nsv), srvc);
+	net->nsn = (uint32_t)min(RE_ARRAY_SIZE(net->nsv), srvc);
 
 	if (srvv) {
 		for (i=0; i<srvc; i++) {
@@ -564,7 +578,7 @@ int net_flush_addresses(struct network *net)
 int net_dns_debug(struct re_printf *pf, const struct network *net)
 {
 	struct sa nsv[NET_MAX_NS];
-	uint32_t i, nsn = ARRAY_SIZE(nsv);
+	uint32_t i, nsn = RE_ARRAY_SIZE(nsv);
 	bool from_sys = false;
 	int err;
 
@@ -575,8 +589,10 @@ int net_dns_debug(struct re_printf *pf, const struct network *net)
 	if (err)
 		nsn = 0;
 
-	err = re_hprintf(pf, " DNS Servers from %s: (%u)\n",
-			 from_sys ? "System" : "Config", nsn);
+	err = re_hprintf(pf, " DNS Servers from %s%s: (%u)\n",
+			 from_sys ? "System" : "Config",
+			 net->cfg.use_getaddrinfo ? "(+getaddrinfo)" : "",
+			 nsn);
 	for (i=0; i<nsn; i++)
 		err |= re_hprintf(pf, "   %u: %J\n", i, &nsv[i]);
 
@@ -611,6 +627,9 @@ bool net_ifaddr_filter(const struct network *net, const char *ifname,
 	struct sa ip;
 
 	if (!sa_isset(sa, SA_ADDR))
+		return false;
+
+	if (sa_is_linklocal(sa) && !cfg->use_linklocal)
 		return false;
 
 	if (str_isset(cfg->ifname) && 0 == sa_set_str(&ip, cfg->ifname, 0) &&

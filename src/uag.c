@@ -3,6 +3,7 @@
  *
  * Copyright (C) 2010 Alfred E. Heggestad
  */
+
 #include <string.h>
 #include <re.h>
 #include <baresip.h>
@@ -75,7 +76,9 @@ int uag_hold_resume(struct call *call)
 		acall = ua_find_active_call(ua);
 	}
 
-	err =  call_hold(acall, true);
+	if (acall)
+		err =  call_hold(acall, true);
+
 	err |= call_hold(toresume, false);
 
 	return err;
@@ -186,7 +189,8 @@ static bool request_handler(const struct sip_msg *msg, void *arg)
 
 	(void)arg;
 
-	if (pl_strcmp(&msg->met, "OPTIONS"))
+	if (pl_strcmp(&msg->met, "OPTIONS") &&
+	    pl_strcmp(&msg->met, "REFER"))
 		return false;
 
 	ua = uag_find_msg(msg);
@@ -195,9 +199,15 @@ static bool request_handler(const struct sip_msg *msg, void *arg)
 		return true;
 	}
 
-	ua_handle_options(ua, msg);
+	if (!pl_strcmp(&msg->met, "OPTIONS")) {
+		ua_handle_options(ua, msg);
+		return true;
+	}
 
-	return true;
+	if (!pl_strcmp(&msg->met, "REFER") && !pl_isset(&msg->to.tag))
+		return ua_handle_refer(ua, msg);
+
+	return false;
 }
 
 
@@ -245,7 +255,7 @@ static bool uri_host_local(const struct uri *uri)
 	if (!uri)
 		return false;
 
-	for (i=0; i<ARRAY_SIZE(hostv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(hostv); i++) {
 
 		if (!pl_strcmp(&uri->host, hostv[i]))
 			return true;
@@ -263,18 +273,37 @@ static bool uri_host_local(const struct uri *uri)
 
 
 #ifdef USE_TLS
-static int add_transp_clientcert(void)
+static int add_account_certs(void)
 {
 	struct le *le;
+	char *host;
 	int err = 0;
 
 	for (le = list_head(&uag.ual); le; le = le->next) {
 		struct account *acc = ua_account(le->data);
+		struct uri *luri;
 		if (acc->cert) {
 			err = sip_transp_add_ccert(uag.sip,
 					&acc->laddr.uri, acc->cert);
 			if (err) {
 				warning("uag: SIP/TLS add client "
+					"certificate %s failed: %m\n",
+					acc->cert, err);
+				return err;
+			}
+
+			host = NULL;
+			luri = account_luri(acc);
+			if (luri) {
+				err = pl_strdup(&host, &luri->host);
+				if (err)
+					return err;
+			}
+
+			err = tls_add_certf(uag.tls, acc->cert, host);
+			mem_deref(host);
+			if (err) {
+				warning("uag: SIP/TLS add server "
 					"certificate %s failed: %m\n",
 					acc->cert, err);
 				return err;
@@ -382,7 +411,7 @@ static int uag_transp_add(const struct sa *laddr)
 			return err;
 		}
 
-		err = add_transp_clientcert();
+		err = add_account_certs();
 		if (err)
 			return err;
 	}
@@ -501,11 +530,12 @@ static void sip_trace_handler(bool tx, enum sip_transp tp,
 	(void)arg;
 
 	re_printf("\x1b[36;1m"
-		  "#\n"
+		  "%H#\n"
 		  "%s %J -> %J\n"
 		  "%b"
 		  "\x1b[;m\n"
 		  ,
+		  fmt_timestamp, NULL,
 		  sip_transp_name(tp), src, dst, pkt, len);
 }
 
@@ -720,8 +750,17 @@ int uag_reset_transp(bool reg, bool reinvite)
 			if (net_dst_source_addr_get(raddr, &laddr))
 				continue;
 
-			if (sa_isset(&laddr, SA_ADDR))
+			if (sa_isset(&laddr, SA_ADDR)) {
+				if (!call_refresh_allowed(call)) {
+					call_hangup(call, 500, "Transport of "
+						    "User Agent changed");
+					ua_event(ua, UA_EVENT_CALL_CLOSED,
+						 call, "Transport of "
+						 "User Agent changed");
+					continue;
+				}
 				err = call_reset_transp(call, &laddr);
+			}
 		}
 	}
 
@@ -1005,7 +1044,7 @@ struct ua *uag_find_param(const char *name, const char *value)
 
 
 /**
- * Find a User-Agent (UA) best fitting for an SIP request
+ * Find a User-Agent (UA) best fitting for a SIP request
  *
  * @param requri The SIP uri for the request
  *
@@ -1013,32 +1052,41 @@ struct ua *uag_find_param(const char *name, const char *value)
  */
 struct ua *uag_find_requri(const char *requri)
 {
-	struct mbuf *mb;
+	struct pl pl;
+
+	pl_set_str(&pl, requri);
+	return uag_find_requri_pl(&pl);
+}
+
+
+/**
+ * Find a User-Agent (UA) best fitting for a SIP request
+ *
+ * @param requri The SIP uri pointer-length string for the request
+ *
+ * @return User-Agent (UA) if found, otherwise NULL
+ */
+struct ua *uag_find_requri_pl(const struct pl *requri)
+{
 	struct pl pl;
 	struct uri *uri;
 	struct le *le;
 	struct ua *ret = NULL;
 	struct sip_addr addr;
+	char *uric;
 	int err;
 
-	if (!requri)
+	if (!pl_isset(requri))
 		return NULL;
 
 	if (!uag.ual.head)
 		return NULL;
 
-	mb = mbuf_alloc(16);
-	if (!mb)
-		return NULL;
-
-	err = account_uri_complete(NULL, mb, requri);
-	if (err) {
-		warning("ua: failed to complete uri: %s\n", requri);
+	err = account_uri_complete_strdup(NULL, &uric, requri);
+	if (err)
 		goto out;
-	}
 
-	mbuf_set_pos(mb, 0);
-	pl_set_mbuf(&pl, mb);
+	pl_set_str(&pl, uric);
 	err = sip_addr_decode(&addr, &pl);
 	if (err) {
 		warning("ua: address %r could not be parsed: %m\n",
@@ -1103,7 +1151,7 @@ struct ua *uag_find_requri(const char *requri)
 	}
 
 out:
-	mem_deref(mb);
+	mem_deref(uric);
 	return ret;
 }
 

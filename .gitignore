@@ -49,3 +49,11 @@ compile_commands.json
 *.obj
 mk/win32/Debug/
 *.vcxproj.user
+
+speaker.wav
+
+# cmake
+CPackConfig.cmake
+CPackSourceConfig.cmake
+packaging/Makefile
+install_manifest.txt

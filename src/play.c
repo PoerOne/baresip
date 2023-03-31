@@ -17,7 +17,7 @@ enum {PTIME = 40};
 struct play {
 	struct le le;
 	struct play **playp;
-	struct lock *lock;
+	mtx_t lock;
 	struct mbuf *mb;
 	struct auplay_st *auplay;
 	char *mod;
@@ -32,8 +32,6 @@ struct play {
 	const struct ausrc *ausrc;
 	struct ausrc_st *ausrc_st;
 	struct ausrc_prm sprm;
-	size_t minsz;
-	size_t maxsz;
 	struct aubuf *aubuf;
 	play_finish_h *fh;
 	void *arg;
@@ -68,22 +66,29 @@ static void tmr_polling(void *arg)
 {
 	struct play *play = arg;
 
-	lock_write_get(play->lock);
+	mtx_lock(&play->lock);
 
 	tmr_start(&play->tmr, PTIME, tmr_polling, play);
 
 	if (play->eof) {
 		if (play->repeat == 0)
 			tmr_start(&play->tmr, 1, tmr_stop, arg);
+
+		mtx_unlock(&play->lock);
+		return;
 	}
 	else if (play->aubuf && !play->auplay) {
-		if (aubuf_cur_size(play->aubuf))
-			start_auplay(play);
+		start_auplay(play);
 
 		tmr_start(&play->tmr, 4, tmr_polling, play);
 	}
 
-	lock_rel(play->lock);
+	if (play->ausrc && play->trep && play->trep <= tmr_jiffies()) {
+		play->trep = 0;
+		start_ausrc(play);
+	}
+
+	mtx_unlock(&play->lock);
 }
 
 
@@ -122,7 +127,7 @@ static void write_handler(struct auframe *af, void *arg)
 	size_t left;
 	size_t count;
 
-	lock_write_get(play->lock);
+	mtx_lock(&play->lock);
 
 	if (play->eof)
 		goto silence;
@@ -148,7 +153,7 @@ static void write_handler(struct auframe *af, void *arg)
 	if (play->eof)
 		memset((uint8_t *)af->sampv + pos, 0, sz - pos);
 
-	lock_rel(play->lock);
+	mtx_unlock(&play->lock);
 }
 
 
@@ -159,16 +164,16 @@ static void destructor(void *arg)
 	list_unlink(&play->le);
 	tmr_cancel(&play->tmr);
 
-	lock_write_get(play->lock);
+	mtx_lock(&play->lock);
 	play->eof = true;
-	lock_rel(play->lock);
+	mtx_unlock(&play->lock);
 
 	mem_deref(play->ausrc_st);
 	mem_deref(play->auplay);
 	mem_deref(play->mod);
 	mem_deref(play->dev);
 	mem_deref(play->mb);
-	mem_deref(play->lock);
+	mtx_destroy(&play->lock);
 	mem_deref(play->aubuf);
 	mem_deref(play->filename);
 
@@ -282,9 +287,11 @@ int play_tone(struct play **playp, struct player *player,
 	play->repeat = repeat ? repeat : 1;
 	play->mb     = mem_ref(tone);
 
-	err = lock_alloc(&play->lock);
-	if (err)
+	err = mtx_init(&play->lock, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	wprm.ch         = ch;
 	wprm.srate      = srate;
@@ -316,14 +323,13 @@ int play_tone(struct play **playp, struct player *player,
 static void ausrc_read_handler(struct auframe *af, void *arg)
 {
 	struct play *play = arg;
-	size_t fsize    = auframe_size(af);
 	int err = 0;
 
 	if (play->eof)
 		return;
 
 
-	err = aubuf_write(play->aubuf, af->sampv, fsize);
+	err = aubuf_write_auframe(play->aubuf, af);
 	if (err)
 		warning("play: aubuf_write: %m \n", err);
 }
@@ -332,20 +338,16 @@ static void ausrc_read_handler(struct auframe *af, void *arg)
 static void aubuf_write_handler(struct auframe *af, void *arg)
 {
 	struct play *play = arg;
-	size_t sz = af->sampc * aufmt_sample_size(play->sprm.fmt);
+	size_t sz = auframe_size(af);
 	size_t left = aubuf_cur_size(play->aubuf);
 
-	aubuf_read(play->aubuf, af->sampv, sz);
+	aubuf_read_auframe(play->aubuf, af);
 
-	lock_write_get(play->lock);
-	if (!play->trep && !play->ausrc_st && left < sz) {
+	mtx_lock(&play->lock);
+	if (!play->trep && !play->ausrc_st && left < sz)
 		check_restart(play);
-	}
-	else if (play->trep && check_restart(play)) {
-		start_ausrc(play);
-	}
 
-	lock_rel(play->lock);
+	mtx_unlock(&play->lock);
 }
 
 
@@ -355,9 +357,11 @@ static void ausrc_error_handler(int err, const char *str, void *arg)
 	(void)str;
 
 	if (err == 0) {
-		lock_write_get(play->lock);
+		mtx_lock(&play->lock);
 		play->ausrc_st = mem_deref(play->ausrc_st);
-		lock_rel(play->lock);
+		mtx_unlock(&play->lock);
+
+		aubuf_flush(play->aubuf);
 	}
 }
 
@@ -366,6 +370,9 @@ static int start_ausrc(struct play *play)
 {
 	int err;
 	const struct ausrc *ausrc = play->ausrc;
+
+	if (!ausrc)
+		return EINVAL;
 
 	err = ausrc->alloch(&play->ausrc_st, ausrc, &play->sprm,
 			play->filename,
@@ -403,6 +410,8 @@ static int play_file_ausrc(struct play **playp,
 	struct play *play;
 	uint32_t srate = 0;
 	uint32_t channels = 0;
+	size_t minsz;
+	size_t maxsz;
 
 	conf_get_u32(conf_cur(), "file_srate", &srate);
 	conf_get_u32(conf_cur(), "file_channels", &channels);
@@ -417,9 +426,11 @@ static int play_file_ausrc(struct play **playp,
 	if (!channels)
 		channels = 1;
 
-	err = lock_alloc(&play->lock);
-	if (err)
+	err = mtx_init(&play->lock, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	str_dup(&play->mod, play_mod);
 	str_dup(&play->dev, play_dev);
@@ -434,12 +445,13 @@ static int play_file_ausrc(struct play **playp,
 	str_dup(&play->filename, filename);
 
 	sampsz = aufmt_sample_size(sprm.fmt);
-	play->maxsz = (24 * sampsz * srate * channels * PTIME) / 1000;
-	play->minsz = ( 3 * sampsz * srate * channels * PTIME) / 1000;
-	err = aubuf_alloc(&play->aubuf, play->minsz, play->maxsz);
+	minsz =  3 * sampsz * srate * channels * PTIME / 1000;
+	maxsz = 24 * sampsz * srate * channels * PTIME / 1000;
+	err = aubuf_alloc(&play->aubuf, minsz, maxsz);
 	if (err)
 		goto out;
 
+	aubuf_set_live(play->aubuf, false);
 	play->ausrc = ausrc;
 	err = start_ausrc(play);
 	if (err)

@@ -158,15 +158,6 @@ int mock_auplay_register(struct auplay **auplayp, struct list *auplayl,
 
 
 /*
- * Mock Audio-filter
- */
-
-
-void mock_aufilt_register(struct list *aufiltl);
-void mock_aufilt_unregister(void);
-
-
-/*
  * Mock Media NAT-traversal
  */
 
@@ -223,6 +214,7 @@ int test_call_transfer(void);
 int test_call_transfer_fail(void);
 int test_call_attended_transfer(void);
 int test_call_video(void);
+int test_call_change_videodir(void);
 int test_call_webrtc(void);
 int test_call_bundle(void);
 int test_call_ipv6ll(void);
@@ -236,6 +228,7 @@ int test_play(void);
 int test_stunuri(void);
 int test_ua_alloc(void);
 int test_ua_options(void);
+int test_ua_refer(void);
 int test_ua_register(void);
 int test_ua_register_auth(void);
 int test_ua_register_auth_dns(void);

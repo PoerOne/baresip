@@ -50,6 +50,8 @@ auplay_format		s16		# s16, float, ..
 auenc_format		s16		# s16, float, ..
 audec_format		s16		# s16, float, ..
 audio_buffer		20-160		# ms
+audio_buffer_mode	fixed		# fixed, adaptive
+audio_silence		-35.0		# in [dB]
 audio_telev_pt		101		# payload type for telephone-event
 
 # Video
@@ -69,7 +71,6 @@ rtp_video_tos		136
 rtcp_mux		no
 jitter_buffer_type	fixed		# off, fixed, adaptive
 jitter_buffer_delay	5-10		# frames
-#jitter_buffer_wish	6		# frames for start
 rtp_stats		no
 #rtp_timeout		60
 
@@ -101,7 +102,6 @@ module			stdio.so
 #module			g722.so
 #module			g726.so
 module			g711.so
-#module			gsm.so
 #module			l16.so
 #module			mpa.so
 #module			codec2.so
@@ -149,7 +149,6 @@ module			alsa.so
 # Audio/Video source modules
 #module			avformat.so
 #module			gst.so
-#module			gst_video.so
 
 # Compatibility modules
 #module			ebuacip.so
@@ -165,7 +164,7 @@ module			ice.so
 # Media encryption modules
 #module			srtp.so
 #module			dtls_srtp.so
-#module			zrtp.so
+#module			gzrtp.so
 
 
 #------------------------------------------------------------------------------
@@ -247,6 +246,7 @@ video_selfview		window # {window,pip}
 #busy_aufile		busy.wav
 #error_aufile		error.wav
 #sip_autoanswer_aufile	autoanswer.wav
+#menu_max_earlyaudio	32
 
 # GTK
 #gtk_clean_number	no
@@ -258,6 +258,7 @@ video_selfview		window # {window,pip}
 #avcodec_h265dec	hevc
 #avcodec_hwaccel	vaapi
 #avcodec_profile_level_id 42002a
+#avcodec_keyint		10      # keyframe interval in [sec]
 
 # ctrl_dbus
 #ctrl_dbus_use	system		# system, session

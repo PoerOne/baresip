@@ -48,6 +48,8 @@ struct agent {
 	unsigned n_mediaenc;
 	unsigned n_rtpestab;
 	unsigned n_rtcp;
+	unsigned n_audio_estab;
+	unsigned n_video_estab;
 };
 
 struct fixture {
@@ -67,6 +69,8 @@ struct fixture {
 	bool fail_transfer;
 	bool stop_on_rtp;
 	bool stop_on_rtcp;
+	bool stop_on_audio_video;
+	bool accept_session_updates;
 };
 
 
@@ -148,12 +152,19 @@ static const struct list *hdrs;
 static const char dtmf_digits[] = "123";
 
 
+static bool agent_audio_video_estab(const struct agent *ag)
+{
+	return ag->n_audio_estab > 0 && ag->n_video_estab > 0;
+}
+
+
 static void event_handler(struct ua *ua, enum ua_event ev,
 			  struct call *call, const char *prm, void *arg)
 {
 	struct fixture *f = arg;
 	struct call *call2 = NULL;
 	struct agent *ag;
+	struct stream *strm = NULL;
 	char curi[256];
 	int err = 0;
 	(void)prm;
@@ -303,7 +314,6 @@ static void event_handler(struct ua *ua, enum ua_event ev,
 				f->xfer = call;
 
 				break;
-
 			}
 		}
 		break;
@@ -327,10 +337,11 @@ static void event_handler(struct ua *ua, enum ua_event ev,
 		++ag->n_transfer;
 
 		err = ua_call_alloc(&call2, ua, VIDMODE_ON, NULL, call,
-				    call_localuri(call), true);
+				call_localuri(call), true);
 		if (!err) {
 			struct pl pl;
 
+			call_set_user_data(call2, call_user_data(call));
 			pl_set_str(&pl, prm);
 
 			err = call_connect(call2, &pl);
@@ -355,9 +366,28 @@ static void event_handler(struct ua *ua, enum ua_event ev,
 
 		break;
 
+	case UA_EVENT_CALL_REMOTE_SDP:
+		if (f->accept_session_updates &&
+		    call_state(call) == CALL_STATE_ESTABLISHED &&
+		    !call_is_outgoing(call) &&
+		    sdp_media_ldir(stream_sdpmedia(video_strm(call_video(
+				call)))) == SDP_SENDRECV &&
+		    sdp_media_rdir(stream_sdpmedia(video_strm(call_video(
+				call)))) == SDP_INACTIVE) {
+			re_cancel();
+		}
+		break;
 	case UA_EVENT_CALL_MENC:
 		++ag->n_mediaenc;
-		ASSERT_TRUE(stream_is_secure(audio_strm(call_audio(call))));
+
+		if (strstr(prm, "audio"))
+			strm = audio_strm(call_audio(call));
+		else if (strstr(prm, "video"))
+			strm = video_strm(call_video(call));
+
+		if (strm) {
+			ASSERT_TRUE(stream_is_secure(strm));
+		}
 		break;
 
 	case UA_EVENT_CALL_DTMF_START:
@@ -373,13 +403,41 @@ static void event_handler(struct ua *ua, enum ua_event ev,
 	case UA_EVENT_CALL_RTPESTAB:
 		++ag->n_rtpestab;
 
+		if (strstr(prm, "audio"))
+			++ag->n_audio_estab;
+		else if (strstr(prm, "video"))
+			++ag->n_video_estab;
+
 		if (f->stop_on_rtp && ag->peer->n_rtpestab > 0)
 			re_cancel();
+
+		if (f->stop_on_audio_video) {
+
+			if (agent_audio_video_estab(ag) &&
+			    agent_audio_video_estab(ag->peer)) {
+
+				re_cancel();
+			}
+		}
 		break;
 
 	case UA_EVENT_CALL_RTCP:
 		++ag->n_rtcp;
 
+		if (f->accept_session_updates &&
+		    call_state(call) == CALL_STATE_ESTABLISHED &&
+		    !call_is_outgoing(call) &&
+		    0 == str_casecmp(prm, "video")&&
+		    sdp_media_ldir(stream_sdpmedia(video_strm(call_video(
+				ua_call(f->a.ua))))) == SDP_SENDRECV &&
+		    sdp_media_rdir(stream_sdpmedia(video_strm(call_video(
+				ua_call(f->a.ua))))) == SDP_SENDRECV &&
+		    sdp_media_ldir(stream_sdpmedia(video_strm(call_video(
+				ua_call(f->b.ua))))) == SDP_SENDRECV &&
+		    sdp_media_rdir(stream_sdpmedia(video_strm(call_video(
+				ua_call(f->b.ua))))) == SDP_SENDRECV) {
+			re_cancel();
+		}
 		if (f->stop_on_rtcp && ag->peer->n_rtcp > 0)
 			re_cancel();
 		break;
@@ -397,8 +455,7 @@ static void event_handler(struct ua *ua, enum ua_event ev,
  out:
 	if (err) {
 		warning("error in event-handler (%m)\n", err);
-		f->err = err;
-		re_cancel();
+		fixture_abort(f, err);
 	}
 }
 
@@ -796,7 +853,9 @@ static void mock_vidisp_handler(const struct vidframe *frame,
 	ASSERT_EQ(conf_config()->video.enc_fmt, (int)frame->fmt);
 
 	/* Stop the test */
-	re_cancel();
+	if (!fix->accept_session_updates) {
+		re_cancel();
+	}
 
  out:
 	if (err)
@@ -842,6 +901,110 @@ int test_call_video(void)
 
 	ASSERT_TRUE(call_has_video(ua_call(f->a.ua)));
 	ASSERT_TRUE(call_has_video(ua_call(f->b.ua)));
+
+ out:
+	fixture_close(f);
+	mem_deref(vidisp);
+	module_unload("fakevideo");
+	mock_vidcodec_unregister();
+
+	return err;
+}
+
+
+int test_call_change_videodir(void)
+{
+	struct fixture fix, *f = &fix;
+	struct vidisp *vidisp = NULL;
+	enum sdp_dir a_video_ldir, a_video_rdir, b_video_ldir, b_video_rdir;
+	int err = 0;
+
+	conf_config()->video.fps = 100;
+	conf_config()->video.enc_fmt = VID_FMT_YUV420P;
+
+	fixture_init(f);
+
+	/* to enable video, we need one vidsrc and vidcodec */
+	mock_vidcodec_register();
+
+	err = mock_vidisp_register(&vidisp, mock_vidisp_handler, f);
+	TEST_ERR(err);
+
+	err = module_load(".", "fakevideo");
+	TEST_ERR(err);
+
+	f->behaviour = BEHAVIOUR_PROGRESS;
+	f->estab_action = ACTION_NOTHING;
+	f->accept_session_updates = true;
+
+	/* Make a call from A to B */
+	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_ON);
+	TEST_ERR(err);
+
+	/* run main-loop with timeout, wait for PROGRESS to re_cancel loop */
+	err = re_main_timeout(10000);
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	err = ua_answer(f->b.ua, ua_call(f->b.ua), VIDMODE_ON);
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	/* run main-loop with timeout, wait for answer to re_canel loop */
+	err = re_main_timeout(10000);
+	TEST_ERR(err);
+	TEST_ERR(fix.err);
+
+	/* verify that video was enabled for this call */
+	ASSERT_EQ(1, fix.a.n_established);
+	ASSERT_EQ(1, fix.b.n_established);
+
+	ASSERT_TRUE(call_has_video(ua_call(f->a.ua)));
+	ASSERT_TRUE(call_has_video(ua_call(f->b.ua)));
+
+	/* Set video inactive */
+	err = call_set_video_dir(ua_call(f->a.ua), SDP_INACTIVE);
+	TEST_ERR(err);
+	err = re_main_timeout(10000);
+	TEST_ERR(err);
+
+	a_video_ldir = sdp_media_ldir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->a.ua)))));
+	a_video_rdir = sdp_media_rdir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->a.ua)))));
+	b_video_ldir = sdp_media_ldir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->b.ua)))));
+	b_video_rdir = sdp_media_rdir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->b.ua)))));
+
+	ASSERT_TRUE(call_has_video(ua_call(f->a.ua)));
+	ASSERT_TRUE(call_has_video(ua_call(f->b.ua)));
+	ASSERT_TRUE(a_video_ldir == SDP_INACTIVE);
+	ASSERT_TRUE(a_video_rdir == SDP_SENDRECV);
+	ASSERT_TRUE(b_video_ldir == SDP_SENDRECV);
+	ASSERT_TRUE(b_video_rdir == SDP_INACTIVE);
+
+	/* Set video sendrecv */
+	err = call_set_video_dir(ua_call(f->a.ua), SDP_SENDRECV);
+	TEST_ERR(err);
+	err = re_main_timeout(10000);
+	TEST_ERR(err);
+
+	a_video_ldir = sdp_media_ldir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->a.ua)))));
+	a_video_rdir = sdp_media_rdir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->a.ua)))));
+	b_video_ldir = sdp_media_ldir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->b.ua)))));
+	b_video_rdir = sdp_media_rdir(stream_sdpmedia(
+			video_strm(call_video(ua_call(f->b.ua)))));
+
+	ASSERT_TRUE(call_has_video(ua_call(f->a.ua)));
+	ASSERT_TRUE(call_has_video(ua_call(f->b.ua)));
+	ASSERT_TRUE(a_video_ldir == SDP_SENDRECV);
+	ASSERT_TRUE(a_video_rdir == SDP_SENDRECV);
+	ASSERT_TRUE(b_video_ldir == SDP_SENDRECV);
+	ASSERT_TRUE(b_video_rdir == SDP_SENDRECV);
 
  out:
 	fixture_close(f);
@@ -1051,7 +1214,7 @@ int test_call_format_float(void)
 
 int test_call_mediaenc(void)
 {
-	struct fixture fix, *f = &fix;
+	struct fixture fix = {0}, *f = &fix;
 	int err = 0;
 
 	err = module_load(".", "srtp");
@@ -1524,7 +1687,7 @@ int test_call_aufilt(void)
  */
 int test_call_webrtc(void)
 {
-	struct fixture fix, *f = &fix;
+	struct fixture fix = {0}, *f = &fix;
 	struct sdp_media *sdp_a, *sdp_b;
 	int err;
 
@@ -1547,7 +1710,7 @@ int test_call_webrtc(void)
 
 	f->estab_action = ACTION_NOTHING;
 	f->behaviour = BEHAVIOUR_ANSWER;
-	f->stop_on_rtp = true;
+	f->stop_on_audio_video = true;
 
 	/* Make a call from A to B */
 	err = ua_connect(f->a.ua, 0, NULL, f->buri, VIDMODE_ON);
@@ -1561,7 +1724,7 @@ int test_call_webrtc(void)
 	/* verify MNAT */
 
 	/* verify that MENC is secure */
-
+#if 0
 	ASSERT_TRUE(
 	  stream_is_secure(audio_strm(call_audio(ua_call(f->a.ua)))));
 	ASSERT_TRUE(
@@ -1571,6 +1734,7 @@ int test_call_webrtc(void)
 	  stream_is_secure(video_strm(call_video(ua_call(f->a.ua)))));
 	ASSERT_TRUE(
 	  stream_is_secure(video_strm(call_video(ua_call(f->b.ua)))));
+#endif
 
 	/* verify that one or more RTP packets were received */
 	ASSERT_TRUE(fix.a.n_rtpestab > 0);
@@ -1610,7 +1774,7 @@ int test_call_webrtc(void)
 
 static int test_call_bundle_base(bool use_mnat, bool use_menc)
 {
-	struct fixture fix, *f = &fix;
+	struct fixture fix = {0}, *f = &fix;
 	struct ausrc *ausrc = NULL;
 	struct vidisp *vidisp = NULL;
 	struct mbuf *sdp = NULL;
@@ -1793,13 +1957,18 @@ static bool find_ipv6ll(const char *ifname, const struct sa *sa, void *arg)
 
 int test_call_ipv6ll(void)
 {
-	struct fixture fix, *f = &fix;
+	struct fixture fix = {0}, *f = &fix;
 	struct network *net = baresip_network();
 	struct sa ipv6ll;
 	bool found;
 	struct sa dst;
 	char uri[50];
 	int err = 0;
+
+	if (!net_laddr_af(net, AF_INET6)) {
+		info("no IPv6 address -- skipping test %s\n", __func__);
+		return 0;
+	}
 
 	err = module_load(".", "ausine");
 	TEST_ERR(err);

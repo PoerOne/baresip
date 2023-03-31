@@ -1,6 +1,12 @@
 name: OpenSSL no-deprecated and LibreSSL
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
 
 jobs:
   ssl:
@@ -11,24 +17,24 @@ jobs:
         ssl: [libressl, openssl]
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - uses: sreimers/pr-dependency-action@v0.3
+    - uses: sreimers/pr-dependency-action@v0.5
       with:
         name: re
         repo: https://github.com/baresip/re
         secret: ${{ secrets.GITHUB_TOKEN }}
 
-    - uses: sreimers/pr-dependency-action@v0.3
-      with:
-        name: rem
-        repo: https://github.com/baresip/rem
-        secret: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: make re/rem
+    - name: make re
       run: |
-        for p in re rem; do cd $p && sudo PATH="$PATH" make install && cd - && sudo rm -Rf $p; done
+        for p in re; do
+          cmake -S $p -B $p/build
+          cmake --build $p/build -j
+        done
+        for p in re; do
+          mv $p ../.
+        done
         sudo ldconfig
 
     - name: make baresip
-      run: make EXTRA_CFLAGS="-Iassets/${{ matrix.ssl }}/include -Werror" EXTRA_LFLAGS="-Lassets/${{ matrix.ssl }}" CCACHE=;
+      run: cmake -B build -DCMAKE_C_FLAGS="-Iassets/${{ matrix.ssl }}/include -Werror" -DCMAKE_EXE_LINKER_FLAGS="-Lassets/${{ matrix.ssl }}" && cmake --build build -j

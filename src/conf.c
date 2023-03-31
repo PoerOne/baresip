@@ -14,6 +14,7 @@
 #ifdef HAVE_IO_H
 #include <io.h>
 #endif
+#include <string.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -106,12 +107,15 @@ int conf_loadfile(struct mbuf **mbp, const char *filename)
 int conf_parse(const char *filename, confline_h *ch, void *arg)
 {
 	struct pl pl, val;
-	struct mbuf *mb;
+	struct mbuf *mb = NULL;
 	int err;
 
 	err = conf_loadfile(&mb, filename);
 	if (err)
 		return err;
+
+	if (!mb)
+		return EINVAL;
 
 	pl.p = (const char *)mb->buf;
 	pl.l = mb->end;
@@ -258,6 +262,9 @@ int conf_get_vidsz(const struct conf *conf, const char *name, struct vidsz *sz)
 	struct pl r, w, h;
 	int err;
 
+	if (!sz)
+		return EINVAL;
+
 	err = conf_get(conf, name, &r);
 	if (err)
 		return err;
@@ -334,6 +341,16 @@ enum jbuf_type conf_get_jbuf_type(const struct pl *pl)
 
 	warning("unsupported jitter buffer type (%r)\n", pl);
 	return JBUF_FIXED;
+}
+
+
+bool conf_aubuf_adaptive(const struct pl *pl)
+{
+	if (0 == pl_strcasecmp(pl, "fixed"))    return false;
+	if (0 == pl_strcasecmp(pl, "adaptive")) return true;
+
+	warning("unsupported audio buffer mode (%r)\n", pl);
+	return false;
 }
 
 
@@ -461,4 +478,19 @@ struct conf *conf_cur(void)
 void conf_close(void)
 {
 	conf_obj = mem_deref(conf_obj);
+}
+
+
+const char *fs_file_extension(const char *filename)
+{
+	const char *p;
+
+	if (!filename)
+		return NULL;
+
+	p = strrchr(filename, '.');
+	if (!p)
+		return NULL;
+
+	return p + 1;
 }

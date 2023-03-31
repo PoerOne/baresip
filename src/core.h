@@ -33,6 +33,13 @@ struct stream_param;
  * Account
  */
 
+struct uasauth {
+	struct le he;
+
+	char *met;
+	bool deny;
+};
+
 
 struct account {
 	char *buf;                   /**< Buffer for the SIP address         */
@@ -44,6 +51,7 @@ struct account {
 	/* parameters: */
 	bool sipans;                 /**< Allow SIP header auto answer mode  */
 	enum sipansbeep sipansbeep;  /**< Beep mode for SIP auto answer      */
+	enum rel100_mode rel100_mode;  /**< 100rel mode for incoming calls   */
 	enum answermode answermode;  /**< Answermode for incoming calls      */
 	int32_t adelay;              /**< Delay for delayed auto answer [ms] */
 	enum dtmfmode dtmfmode;      /**< Send type for DTMF tones           */
@@ -80,6 +88,10 @@ struct account {
 	char *auplay_dev;
 	uint32_t autelev_pt;         /**< Payload type for telephone-events  */
 	char *extra;                 /**< Extra parameters                   */
+	char *uas_user;              /**< UAS authentication username        */
+	char *uas_pass;              /**< UAS authentication password        */
+	bool rtcp_mux;               /**< RTCP multiplexing                  */
+	bool pinhole;                /**< NAT pinhole flag                   */
 };
 
 
@@ -128,6 +140,7 @@ int  call_af(const struct call *call);
 void call_set_xrtpstat(struct call *call);
 void call_set_custom_hdrs(struct call *call, const struct list *hdrs);
 const struct sa *call_laddr(const struct call *call);
+int call_streams_alloc(struct call *call);
 
 /*
 * Custom headers
@@ -144,33 +157,19 @@ int conf_get_csv(const struct conf *conf, const char *name,
 int conf_get_float(const struct conf *conf, const char *name, double *val);
 
 
-/*
- * Metric
- */
-
-struct metric {
-	/* internal stuff: */
-	struct tmr tmr;
-	struct lock *lock;
-	uint64_t ts_start;
-	bool started;
-
-	/* counters: */
-	uint32_t n_packets;
-	uint32_t n_bytes;
-	uint32_t n_err;
-
-	/* bitrate calculation */
-	uint32_t cur_bitrate;
-	uint64_t ts_last;
-	uint32_t n_bytes_last;
-};
+struct metric;
 
 int      metric_init(struct metric *metric);
 void     metric_reset(struct metric *metric);
 void     metric_add_packet(struct metric *metric, size_t packetsize);
 double   metric_avg_bitrate(const struct metric *metric);
+uint32_t metric_n_packets(struct metric *metric);
+uint32_t metric_n_bytes(struct metric *metric);
+uint32_t metric_n_err(struct metric *metric);
+uint32_t metric_bitrate(struct metric *metric);
+void     metric_inc_err(struct metric *metric);
 
+struct metric *metric_alloc(void);
 
 /*
  * Module
@@ -189,6 +188,7 @@ int  reg_add(struct list *lst, struct ua *ua, int regid);
 int  reg_register(struct reg *reg, const char *reg_uri,
 		    const char *params, uint32_t regint, const char *outbound);
 void reg_unregister(struct reg *reg);
+void reg_stop(struct reg *reg);
 bool reg_isok(const struct reg *reg);
 bool reg_failed(const struct reg *reg);
 int  reg_debug(struct re_printf *pf, const struct reg *reg);
@@ -196,43 +196,19 @@ int  reg_json_api(struct odict *od, const struct reg *reg);
 int  reg_status(struct re_printf *pf, const struct reg *reg);
 int  reg_af(const struct reg *reg);
 const struct sa *reg_laddr(const struct reg *reg);
-
-
-/*
- * RTP Header Extensions
- */
-
-#define RTPEXT_HDR_SIZE        4
-#define RTPEXT_TYPE_MAGIC 0xbede
-
-enum {
-	RTPEXT_ID_MIN  =  1,
-	RTPEXT_ID_MAX  = 14,
-};
-
-enum {
-	RTPEXT_LEN_MIN =  1,
-	RTPEXT_LEN_MAX = 16,
-};
-
-struct rtpext {
-	unsigned id:4;
-	unsigned len:4;
-	uint8_t data[RTPEXT_LEN_MAX];
-};
-
-
-int rtpext_hdr_encode(struct mbuf *mb, size_t num_bytes);
-int rtpext_encode(struct mbuf *mb, uint8_t id, size_t len,
-		  const uint8_t *data);
-int rtpext_decode(struct rtpext *ext, struct mbuf *mb);
-
+void reg_set_custom_hdrs(struct reg *reg, const struct list *hdrs);
 
 /*
  * RTP Stats
  */
 
 int rtpstat_print(struct re_printf *pf, const struct call *call);
+
+/*
+ * STUN URI
+ */
+
+int stunuri_decode_uri(struct stun_uri **sup, const struct uri *uri);
 
 
 /*
@@ -303,6 +279,7 @@ int  stream_alloc(struct stream **sp, struct list *streaml,
 		  void *arg);
 void stream_hold(struct stream *s, bool hold);
 void stream_set_ldir(struct stream *s, enum sdp_dir dir);
+void stream_set_rtcp_interval(struct stream *s, uint32_t n);
 void stream_set_srate(struct stream *s, uint32_t srate_tx, uint32_t srate_rx);
 bool stream_is_ready(const struct stream *strm);
 int  stream_print(struct re_printf *pf, const struct stream *s);
@@ -318,17 +295,18 @@ void stream_update_encoder(struct stream *s, int pt_enc);
 int  stream_pt_enc(const struct stream *strm);
 int  stream_send(struct stream *s, bool ext, bool marker, int pt, uint32_t ts,
 		 struct mbuf *mb);
+int  stream_resend(struct stream *s, uint16_t seq, bool ext, bool marker,
+		  int pt, uint32_t ts, struct mbuf *mb);
 
 /* Receive */
 void stream_flush(struct stream *s);
-void stream_silence_on(struct stream *s, bool on);
-int  stream_decode(struct stream *s);
 int  stream_ssrc_rx(const struct stream *strm, uint32_t *ssrc);
 
 
 struct bundle *stream_bundle(const struct stream *strm);
 void stream_parse_mid(struct stream *strm);
 void stream_enable_bundle(struct stream *strm, enum bundle_state st);
+void stream_enable_natpinhole(struct stream *strm, bool enable);
 
 
 /*
@@ -340,9 +318,11 @@ struct ua;
 void         ua_printf(const struct ua *ua, const char *fmt, ...);
 
 int ua_print_allowed(struct re_printf *pf, const struct ua *ua);
+int ua_print_require(struct re_printf *pf, const struct ua *ua);
 struct call *ua_find_call_onhold(const struct ua *ua);
 struct call *ua_find_active_call(struct ua *ua);
 void ua_handle_options(struct ua *ua, const struct sip_msg *msg);
+bool ua_handle_refer(struct ua *ua, const struct sip_msg *msg);
 void sipsess_conn_handler(const struct sip_msg *msg, void *arg);
 bool ua_catchall(struct ua *ua);
 bool ua_reghasladdr(const struct ua *ua, const struct sa *laddr);
@@ -414,3 +394,51 @@ void     timestamp_set(struct timestamp_recv *ts, uint32_t rtp_ts);
 uint64_t timestamp_duration(const struct timestamp_recv *ts);
 uint64_t timestamp_calc_extended(uint32_t num_wraps, uint32_t ts);
 double   timestamp_calc_seconds(uint64_t ts, uint32_t clock_rate);
+
+
+/*
+ * WebRTC Media Track
+ */
+
+
+typedef void (mediatrack_close_h)(int err, void *arg);
+
+/*
+ * https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack
+ *
+ * The MediaStreamTrack interface represents a single media track within
+ * a stream; typically, these are audio or video tracks, but other
+ * track types may exist as well.
+ *
+ * NOTE: one-to-one mapping with 'struct stream'
+ */
+struct media_track {
+	struct le le;
+	enum media_kind kind;
+	union {
+		struct audio *au;
+		struct video *vid;
+		void *p;
+	} u;
+
+	bool ice_conn;
+	bool dtls_ok;
+	bool rtp;
+	bool rtcp;
+
+	mediatrack_close_h *closeh;
+	void *arg;
+};
+
+
+struct media_track *media_track_add(struct list *lst,
+				    enum media_kind kind,
+				    mediatrack_close_h *closeh, void *arg);
+void mediatrack_stop(struct media_track *media);
+void mediatrack_set_handlers(struct media_track *media);
+void mediatrack_summary(const struct media_track *media);
+int  mediatrack_debug(struct re_printf *pf, const struct media_track *media);
+struct media_track *mediatrack_lookup_media(const struct list *medial,
+					    struct stream *strm);
+void mediatrack_close(struct media_track *media, int err);
+void mediatrack_sdp_attr_decode(struct media_track *media);

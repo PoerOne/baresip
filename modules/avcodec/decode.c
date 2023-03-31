@@ -4,6 +4,8 @@
  * Copyright (C) 2010 - 2013 Alfred E. Heggestad
  */
 #include <re.h>
+#include <re_h264.h>
+#include <re_h265.h>
 #include <rem.h>
 #include <baresip.h>
 #include <libavcodec/avcodec.h>
@@ -68,14 +70,9 @@ static enum vidfmt avpixfmt_to_vidfmt(enum AVPixelFormat pix_fmt)
 	case AV_PIX_FMT_YUV444P:  return VID_FMT_YUV444P;
 	case AV_PIX_FMT_NV12:     return VID_FMT_NV12;
 	case AV_PIX_FMT_NV21:     return VID_FMT_NV21;
+	case AV_PIX_FMT_YUV422P:  return VID_FMT_YUV422P;
 	default:                  return (enum vidfmt)-1;
 	}
-}
-
-
-static inline int16_t seq_diff(uint16_t x, uint16_t y)
-{
-	return (int16_t)(y - x);
 }
 
 
@@ -86,7 +83,6 @@ static inline void fragment_rewind(struct viddec_state *vds)
 }
 
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
                                         const enum AVPixelFormat *pix_fmts)
 {
@@ -102,7 +98,6 @@ static enum AVPixelFormat get_hw_format(AVCodecContext *ctx,
 
 	return AV_PIX_FMT_NONE;
 }
-#endif
 
 
 static int init_decoder(struct viddec_state *st, const char *name)
@@ -132,7 +127,7 @@ static int init_decoder(struct viddec_state *st, const char *name)
 
 	st->ctx = avcodec_alloc_context3(st->codec);
 
-	/* TODO: If avcodec_h264dec is h264_mediacodec, extradata needs to
+	/* XXX: If avcodec_h264dec is h264_mediacodec, extradata needs to
            added to context that contains Sequence Parameter Set (SPS) and
 	   Picture Parameter Set (PPS), before avcodec_open2() is called.
 	*/
@@ -142,7 +137,6 @@ static int init_decoder(struct viddec_state *st, const char *name)
 	if (!st->ctx || !st->pict)
 		return ENOMEM;
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	/* Hardware accelleration */
 	if (avcodec_hw_device_ctx) {
 		st->ctx->hw_device_ctx = av_buffer_ref(avcodec_hw_device_ctx);
@@ -154,7 +148,6 @@ static int init_decoder(struct viddec_state *st, const char *name)
 	else {
 		info("avcodec: decode: hardware accel disabled\n");
 	}
-#endif
 
 	if (avcodec_open2(st->ctx, st->codec, NULL) < 0)
 		return ENOENT;
@@ -213,13 +206,11 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 	int i, got_picture, ret;
 	int err = 0;
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	if (st->ctx->hw_device_ctx) {
 		hw_frame = av_frame_alloc();
 		if (!hw_frame)
 			return ENOMEM;
 	}
-#endif
 
 	err = mbuf_fill(st->mb, 0x00, AV_INPUT_BUFFER_PADDING_SIZE);
 	if (err)
@@ -234,8 +225,6 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 
 	avpkt->data = st->mb->buf;
 	avpkt->size = (int)st->mb->end;
-
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 37, 100)
 
 	ret = avcodec_send_packet(st->ctx, avpkt);
 	if (ret < 0) {
@@ -257,17 +246,9 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 	}
 
 	got_picture = true;
-#else
-	ret = avcodec_decode_video2(st->ctx, st->pict, &got_picture, avpkt);
-	if (ret < 0) {
-		err = EBADMSG;
-		goto out;
-	}
-#endif
 
 	if (got_picture) {
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 		if (hw_frame) {
 			/* retrieve data from GPU to CPU */
 			ret = av_hwframe_transfer_data(st->pict, hw_frame, 0);
@@ -279,7 +260,6 @@ static int ffdecode(struct viddec_state *st, struct vidframe *frame,
 
 			st->pict->key_frame = hw_frame->key_frame;
 		}
-#endif
 
 		frame->fmt = avpixfmt_to_vidfmt(st->pict->format);
 		if (frame->fmt == (enum vidfmt)-1) {
@@ -402,7 +382,7 @@ int avcodec_decode_h264(struct viddec_state *st, struct vidframe *frame,
 				return 0;
 			}
 
-			if (seq_diff(st->frag_seq, seq) != 1) {
+			if (rtp_seq_diff(st->frag_seq, seq) != 1) {
 				debug("avcodec: lost fragments detected\n");
 				fragment_rewind(st);
 				st->frag = false;
@@ -474,101 +454,6 @@ int avcodec_decode_h264(struct viddec_state *st, struct vidframe *frame,
  out:
 	mbuf_rewind(st->mb);
 	st->frag = false;
-
-	return err;
-}
-
-
-int avcodec_decode_h263(struct viddec_state *st, struct vidframe *frame,
-		bool *intra, bool marker, uint16_t seq, struct mbuf *src)
-{
-	struct h263_hdr hdr;
-	int err;
-
-	if (!st || !frame || !intra)
-		return EINVAL;
-
-	*intra = false;
-
-	if (!src)
-		return 0;
-
-	(void)seq;
-
-	err = h263_hdr_decode(&hdr, src);
-	if (err)
-		return err;
-
-	if (hdr.i && !st->got_keyframe)
-		return EPROTO;
-
-#if 0
-	debug(".....[%s seq=%5u ] MODE %s -"
-	      " SBIT=%u EBIT=%u I=%s"
-	      " (%5u/%5u bytes)\n",
-	      marker ? "M" : " ", seq,
-	      h263_hdr_mode(&hdr) == H263_MODE_A ? "A" : "B",
-	      hdr.sbit, hdr.ebit, hdr.i ? "Inter" : "Intra",
-	      mbuf_get_left(src), st->mb->end);
-#endif
-
-#if 0
-	if (st->mb->pos == 0) {
-		uint8_t *p = mbuf_buf(src);
-
-		if (p[0] != 0x00 || p[1] != 0x00) {
-			warning("invalid PSC detected (%02x %02x)\n",
-				p[0], p[1]);
-			return EPROTO;
-		}
-	}
-#endif
-
-	/*
-	 * The H.263 Bit-stream can be fragmented on bit-level,
-	 * indicated by SBIT and EBIT. Example:
-	 *
-	 *               8 bit  2 bit
-	 *            .--------.--.
-	 * Packet 1   |        |  |
-	 * SBIT=0     '--------'--'
-	 * EBIT=6
-	 *                        .------.--------.--------.
-	 * Packet 2               |      |        |        |
-	 * SBIT=2                 '------'--------'--------'
-	 * EBIT=0                   6bit    8bit     8bit
-	 *
-	 */
-
-	if (hdr.sbit > 0) {
-		const uint8_t mask  = (1 << (8 - hdr.sbit)) - 1;
-		const uint8_t sbyte = mbuf_read_u8(src) & mask;
-
-		st->mb->buf[st->mb->end - 1] |= sbyte;
-	}
-
-	err = mbuf_write_mem(st->mb, mbuf_buf(src),
-			     mbuf_get_left(src));
-	if (err)
-		goto out;
-
-	if (!marker) {
-
-		if (st->mb->end > DECODE_MAXSZ) {
-			warning("avcodec: decode buffer size exceeded\n");
-			err = ENOMEM;
-			goto out;
-		}
-
-		return 0;
-	}
-
-	err = ffdecode(st, frame, intra);
-	if (err)
-		goto out;
-
- out:
-	mbuf_rewind(st->mb);
 
 	return err;
 }
@@ -677,7 +562,7 @@ int avcodec_decode_h265(struct viddec_state *vds, struct vidframe *frame,
 				return 0;
 			}
 
-			if (seq_diff(vds->frag_seq, seq) != 1) {
+			if (rtp_seq_diff(vds->frag_seq, seq) != 1) {
 				debug("h265: lost fragments detected\n");
 				fragment_rewind(vds);
 				vds->frag = false;

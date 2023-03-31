@@ -24,7 +24,7 @@ static void destructor(void *arg)
 	list_clear(&acc->vidcodecl);
 	mem_deref(acc->auth_user);
 	mem_deref(acc->auth_pass);
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++)
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++)
 		mem_deref(acc->outboundv[i]);
 	mem_deref(acc->regq);
 	mem_deref(acc->sipnat);
@@ -42,6 +42,8 @@ static void destructor(void *arg)
 	mem_deref(acc->auplay_dev);
 	mem_deref(acc->cert);
 	mem_deref(acc->extra);
+	mem_deref(acc->uas_user);
+	mem_deref(acc->uas_pass);
 }
 
 
@@ -69,6 +71,17 @@ static int param_u32(uint32_t *v, const struct pl *params, const char *name)
 }
 
 
+static int param_bool(bool *v, const struct pl *params, const char *name)
+{
+	struct pl pl;
+
+	if (msg_param_decode(params, name, &pl))
+		return 0;
+
+	return pl_bool(v, &pl);
+}
+
+
 /*
  * Decode STUN parameters, inspired by RFC 7064
  *
@@ -81,19 +94,27 @@ static int param_u32(uint32_t *v, const struct pl *params, const char *name)
 static int stunsrv_decode(struct account *acc, const struct sip_addr *aor)
 {
 	struct pl srv, tmp;
+	struct uri uri;
 	int err;
 
 	if (!acc || !aor)
 		return EINVAL;
 
+	memset(&uri, 0, sizeof(uri));
 	if (0 == msg_param_decode(&aor->params, "stunserver", &srv)) {
 
 		info("using stunserver: '%r'\n", &srv);
 
-		err = stunuri_decode(&acc->stun_host, &srv);
+		err = uri_decode(&uri, &srv);
 		if (err) {
-			warning("account: decode '%r' failed: %m\n",
+			warning("account: decode '%r' failed (%m)\n",
 				&srv, err);
+			return err;
+		}
+
+		err = stunuri_decode_uri(&acc->stun_host, &uri);
+		if (err) {
+			return err;
 		}
 	}
 
@@ -101,9 +122,15 @@ static int stunsrv_decode(struct account *acc, const struct sip_addr *aor)
 
 	if (0 == msg_param_exists(&aor->params, "stunuser", &tmp))
 		err |= param_dstr(&acc->stun_user, &aor->params, "stunuser");
+	else if (pl_isset(&uri.user))
+		err |= re_sdprintf(&acc->stun_user, "%H",
+					uri_user_unescape, &uri.user);
 
 	if (0 == msg_param_exists(&aor->params, "stunpass", &tmp))
 		err |= param_dstr(&acc->stun_pass, &aor->params, "stunpass");
+	else if (pl_isset(&uri.password))
+		err |= re_sdprintf(&acc->stun_pass, "%H",
+					uri_password_unescape, &uri.password);
 
 	return err;
 }
@@ -117,9 +144,12 @@ static int media_decode(struct account *acc, const struct pl *prm)
 	if (!acc || !prm)
 		return EINVAL;
 
-	err |= param_dstr(&acc->mencid,  prm, "mediaenc");
-	err |= param_dstr(&acc->mnatid,  prm, "medianat");
-	err |= param_u32(&acc->ptime,    prm, "ptime"   );
+	err |= param_dstr(&acc->mencid,   prm, "mediaenc");
+	err |= param_dstr(&acc->mnatid,   prm, "medianat");
+	err |= param_u32(&acc->ptime,     prm, "ptime");
+	err |= param_bool(&acc->rtcp_mux, prm, "rtcp_mux");
+	acc->pinhole = true;
+	err |= param_bool(&acc->pinhole, &acc->laddr.params, "natpinhole");
 
 	return err;
 }
@@ -217,6 +247,30 @@ static void answermode_decode(struct account *prm, const struct pl *pl)
 
 	if (0 == msg_param_decode(pl, "answerdelay", &adelay))
 		prm->adelay = pl_u32(&adelay);
+}
+
+
+static void rel100_decode(struct account *prm, const struct pl *pl)
+{
+	struct pl rmode;
+
+	prm->rel100_mode = REL100_DISABLED;
+
+	if (0 == msg_param_decode(pl, "100rel", &rmode)) {
+
+		if (0 == pl_strcasecmp(&rmode, "no")) {
+			prm->rel100_mode = REL100_DISABLED;
+		}
+		else if (0 == pl_strcasecmp(&rmode, "yes")) {
+			prm->rel100_mode = REL100_ENABLED;
+		}
+		else if (0 == pl_strcasecmp(&rmode, "required")) {
+			prm->rel100_mode = REL100_REQUIRED;
+		}
+		else {
+			warning("account: 100rel mode unknown (%r)\n", &rmode);
+		}
+	}
 }
 
 
@@ -330,7 +384,7 @@ static int audio_codecs_decode(struct account *acc, const struct pl *prm)
 			/* NOTE: static list with references to aucodec */
 			list_append(&acc->aucodecl, &acc->acv[i++], ac);
 
-			if (i >= ARRAY_SIZE(acc->acv))
+			if (i >= RE_ARRAY_SIZE(acc->acv))
 				break;
 		}
 	}
@@ -372,13 +426,32 @@ static int video_codecs_decode(struct account *acc, const struct pl *prm)
 						vc);
 
 				acc->videoen = true;
-				if (i >= ARRAY_SIZE(acc->vcv))
+				if (i >= RE_ARRAY_SIZE(acc->vcv))
 					return 0;
 			}
 		}
 	}
 
 	return 0;
+}
+
+
+static void uasauth_decode(struct account *acc, const struct pl *prm)
+{
+	struct pl val;
+
+	if (!acc || !prm)
+		return;
+
+	if (msg_param_decode(prm, "uas_user", &val))
+		return;
+
+	(void)pl_strdup(&acc->uas_user, &val);
+
+	if (msg_param_decode(prm, "uas_pass", &val))
+		return;
+
+	(void)pl_strdup(&acc->uas_pass, &val);
 }
 
 
@@ -417,7 +490,7 @@ static int sip_params_decode(struct account *acc, const struct sip_addr *aor)
 
 	err |= param_dstr(&acc->regq, &aor->params, "regq");
 
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 
 		char expr[16] = "outbound";
 
@@ -512,9 +585,11 @@ int account_alloc(struct account **accp, const char *sipaddr)
 	/* Decode parameters */
 	acc->ptime = 20;
 	err |= sip_params_decode(acc, &acc->laddr);
+	       rel100_decode(acc, &acc->laddr.params);
 	       answermode_decode(acc, &acc->laddr.params);
 	       autoanswer_decode(acc, &acc->laddr.params);
-	       dtmfmode_decode(acc,&acc->laddr.params);
+	       dtmfmode_decode(acc, &acc->laddr.params);
+	       uasauth_decode(acc, &acc->laddr.params);
 	err |= audio_codecs_decode(acc, &acc->laddr.params);
 	err |= video_codecs_decode(acc, &acc->laddr.params);
 	err |= media_decode(acc, &acc->laddr.params);
@@ -626,7 +701,7 @@ int account_set_auth_pass(struct account *acc, const char *pass)
  */
 int account_set_outbound(struct account *acc, const char *ob, unsigned ix)
 {
-	if (!acc || ix >= ARRAY_SIZE(acc->outboundv))
+	if (!acc || ix >= RE_ARRAY_SIZE(acc->outboundv))
 		return EINVAL;
 
 	acc->outboundv[ix] = mem_deref(acc->outboundv[ix]);
@@ -952,56 +1027,57 @@ int account_set_display_name(struct account *acc, const char *dname)
 
 
 /**
- * Sets MWI on (value "yes") or off (value "no")
+ * Sets MWI on (value true) or off (value false)
  *
  * @param acc      User-Agent account
- * @param value    "yes" or "no"
+ * @param value    true or false
  *
  * @return 0 if success, otherwise errorcode
  */
-int account_set_mwi(struct account *acc, const char *value)
+int account_set_mwi(struct account *acc, bool value)
 {
 	if (!acc)
 		return EINVAL;
 
-	if (0 == str_casecmp(value, "yes"))
-		acc->mwi = true;
-	else
-		if (0 == str_casecmp(value, "no"))
-			acc->mwi = false;
-		else {
-			warning("account: unknown mwi value: %r\n",
-				value);
-			return EINVAL;
-		}
+	acc->mwi = value;
 
 	return 0;
 }
 
 
 /**
- * Sets call transfer on (value "yes") or off (value "no")
+ * Sets call transfer on (value true) or off (value false)
  *
  * @param acc      User-Agent account
- * @param value    "yes" or "no"
+ * @param value    true or false
  *
  * @return 0 if success, otherwise errorcode
  */
-int account_set_call_transfer(struct account *acc, const char *value)
+int account_set_call_transfer(struct account *acc, bool value)
 {
 	if (!acc)
 		return EINVAL;
 
-	if (0 == str_casecmp(value, "yes"))
-		acc->refer = true;
-	else
-		if (0 == str_casecmp(value, "no"))
-			acc->refer = false;
-		else {
-			warning("account: unknown call transfer: %r\n",
-				value);
-			return EINVAL;
-		}
+	acc->refer = value;
+
+	return 0;
+}
+
+
+/**
+ * Sets rtcp_mux on (value true) or off (value false)
+ *
+ * @param acc      User-Agent account
+ * @param value    true or false
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int account_set_rtcp_mux(struct account *acc, bool value)
+{
+	if (!acc)
+		return EINVAL;
+
+	acc->rtcp_mux = value;
 
 	return 0;
 }
@@ -1187,6 +1263,44 @@ int account_set_answermode(struct account *acc, enum answermode mode)
 
 
 /**
+ * Get the 100rel mode of an account
+ *
+ * @param acc User-Agent account
+ *
+ * @return 100rel mode
+ */
+enum rel100_mode account_rel100_mode(const struct account *acc)
+{
+	return acc ? acc->rel100_mode : REL100_ENABLED;
+}
+
+
+/**
+ * Set the 100rel mode of an account
+ *
+ * @param acc  User-Agent account
+ * @param mode 100rel mode
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int account_set_rel100_mode(struct account *acc, enum rel100_mode mode)
+{
+	if (!acc)
+		return EINVAL;
+
+	if ((mode != REL100_DISABLED) && (mode != REL100_ENABLED) &&
+	    (mode != REL100_REQUIRED)) {
+		warning("account: invalid 100rel mode : `%d'\n", mode);
+		return EINVAL;
+	}
+
+	acc->rel100_mode = mode;
+
+	return 0;
+}
+
+
+/**
  * Get the dtmfmode of an account
  *
  * @param acc User-Agent account
@@ -1287,7 +1401,7 @@ const char *account_auth_pass(const struct account *acc)
  */
 const char *account_outbound(const struct account *acc, unsigned ix)
 {
-	if (!acc || ix >= ARRAY_SIZE(acc->outboundv))
+	if (!acc || ix >= RE_ARRAY_SIZE(acc->outboundv))
 		return NULL;
 
 	return acc->outboundv[ix];
@@ -1502,6 +1616,18 @@ static const char *answermode_str(enum answermode mode)
 }
 
 
+static const char *rel100_mode_str(enum rel100_mode mode)
+{
+	switch (mode) {
+
+	case REL100_ENABLED:    return "yes";
+	case REL100_DISABLED:   return "no";
+	case REL100_REQUIRED:   return "required";
+	default: return "???";
+	}
+}
+
+
 static const char *dtmfmode_str(enum dtmfmode mode)
 {
 	switch (mode) {
@@ -1557,14 +1683,14 @@ const char *account_medianat(const struct account *acc)
  *
  * @param acc User-Agent account
  *
- * @return "yes" or "no"
+ * @return true or false
  */
-const char *account_mwi(const struct account *acc)
+bool account_mwi(const struct account *acc)
 {
 	if (!acc)
-		return "no";
+		return false;
 
-	return acc->mwi ? "yes" : "no";
+	return acc->mwi;
 }
 
 
@@ -1573,14 +1699,30 @@ const char *account_mwi(const struct account *acc)
  *
  * @param acc User-Agent account
  *
- * @return "yes" or "no"
+ * @return true or false
  */
-const char *account_call_transfer(const struct account *acc)
+bool account_call_transfer(const struct account *acc)
 {
 	if (!acc)
-		return "no";
+		return false;
 
-	return acc->refer ? "yes" : "no";
+	return acc->refer;
+}
+
+
+/**
+ * Get rtcp_mux capability of an account
+ *
+ * @param acc User-Agent account
+ *
+ * @return true or false
+ */
+bool account_rtcp_mux(const struct account *acc)
+{
+	if (!acc)
+		return false;
+
+	return acc->rtcp_mux;
 }
 
 
@@ -1609,38 +1751,76 @@ const char *account_extra(const struct account *acc)
 int account_uri_complete(const struct account *acc, struct mbuf *buf,
 			 const char *uri)
 {
+	char *str;
+	struct pl pl;
+	int err;
+
+	pl_set_str(&pl, uri);
+	err = account_uri_complete_strdup(acc, &str, &pl);
+	if (err)
+		return err;
+
+	err = mbuf_write_str(buf, str);
+	mem_deref(str);
+
+	return err;
+}
+
+
+/**
+ * Auto complete a SIP uri, add scheme and domain if missing
+ *
+ * @param acc  User-Agent account
+ * @param strp Pointer to destination string; allocated and set
+ * @param uri  Input SIP uri pointer-length string
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+int account_uri_complete_strdup(const struct account *acc, char **strp,
+				const struct pl *uri)
+{
 	struct sa sa_addr;
-	size_t len;
 	bool uri_is_ip;
 	char *uridup;
 	char *host;
 	char *c;
+	bool complete = false;
+	struct mbuf *mb;
+	struct pl trimmed;
 	int err = 0;
 
-	if (!buf || !uri)
+	if (!strp || !pl_isset(uri))
 		return EINVAL;
 
 	/* Skip initial whitespace */
-	while (isspace(*uri))
-		++uri;
+	trimmed = *uri;
+	err = pl_ltrim(&trimmed);
+	if (err)
+		return err;
 
-	len = str_len(uri);
+	mb = mbuf_alloc(64);
+	if (!mb)
+		return ENOMEM;
 
 	/* Append sip: scheme if missing */
-	if (0 != re_regex(uri, len, "sip:"))
-		err |= mbuf_printf(buf, "sip:");
+	if (re_regex(trimmed.p, trimmed.l, "sip:"))
+		err |= mbuf_printf(mb, "sip:");
+	else
+		complete = true;
 
-	err |= mbuf_write_str(buf, uri);
-
+	err |= mbuf_write_pl(mb, &trimmed);
 	if (!acc || err)
-		return err;
+		goto out;
+
+	if (complete)
+		goto out;
 
 	/* Append domain if missing and uri is not IP address */
 
 	/* check if uri is valid IP address */
-	err = str_dup(&uridup, uri);
+	err = pl_strdup(&uridup, &trimmed);
 	if (err)
-		return err;
+		goto out;
 
 	if (!strncmp(uridup, "sip:", 4))
 		host = uridup + 4;
@@ -1661,15 +1841,15 @@ int account_uri_complete(const struct account *acc, struct mbuf *buf,
 
 	mem_deref(uridup);
 
-	if (0 != re_regex(uri, len, "[^@]+@[^]+", NULL, NULL) &&
-		1 != uri_is_ip) {
+	if (!uri_is_ip &&
+	    0 != re_regex(trimmed.p, trimmed.l, "[^@]+@[^]+", NULL, NULL)) {
 #if HAVE_INET6
 		if (AF_INET6 == acc->luri.af)
-			err |= mbuf_printf(buf, "@[%r]",
+			err |= mbuf_printf(mb, "@[%r]",
 					   &acc->luri.host);
 		else
 #endif
-			err |= mbuf_printf(buf, "@%r",
+			err |= mbuf_printf(mb, "@%r",
 					   &acc->luri.host);
 
 		/* Also append port if specified and not 5060 */
@@ -1680,11 +1860,18 @@ int account_uri_complete(const struct account *acc, struct mbuf *buf,
 			break;
 
 		default:
-			err |= mbuf_printf(buf, ":%u", acc->luri.port);
+			err |= mbuf_printf(mb, ":%u", acc->luri.port);
 			break;
 		}
 	}
 
+out:
+	if (!err) {
+		mbuf_set_pos(mb, 0);
+		err = mbuf_strdup(mb, strp, mbuf_get_left(mb));
+	}
+
+	mem_deref(mb);
 	return err;
 }
 
@@ -1713,6 +1900,8 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 			  uri_encode, &acc->luri);
 	err |= re_hprintf(pf, " aor:          %s\n", acc->aor);
 	err |= re_hprintf(pf, " dispname:     %s\n", acc->dispname);
+	err |= re_hprintf(pf, " 100rel:       %s\n",
+			  rel100_mode_str(acc->rel100_mode));
 	err |= re_hprintf(pf, " answermode:   %s\n",
 			  answermode_str(acc->answermode));
 	err |= re_hprintf(pf, " sipans:       %s\n",
@@ -1736,13 +1925,14 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 			  acc->mencid ? acc->mencid : "none");
 	err |= re_hprintf(pf, " medianat:     %s\n",
 			  acc->mnatid ? acc->mnatid : "none");
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 		if (acc->outboundv[i]) {
 			err |= re_hprintf(pf, " outbound%d:    %s\n",
 					  i+1, acc->outboundv[i]);
 		}
 	}
-	err |= re_hprintf(pf, " mwi:          %s\n", account_mwi(acc));
+	err |= re_hprintf(pf, " mwi:          %s\n",
+			  account_mwi(acc) ? "yes" : "no");
 	err |= re_hprintf(pf, " ptime:        %u\n", acc->ptime);
 	err |= re_hprintf(pf, " regint:       %u\n", acc->regint);
 	err |= re_hprintf(pf, " prio:         %u\n", acc->prio);
@@ -1752,6 +1942,8 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 	err |= re_hprintf(pf, " stunuser:     %s\n", acc->stun_user);
 	err |= re_hprintf(pf, " stunserver:   %H\n",
 			  stunuri_print, acc->stun_host);
+	err |= re_hprintf(pf, " rtcp_mux:     %s\n",
+			  acc->rtcp_mux ? "yes" : "no");
 
 	if (!list_isempty(&acc->vidcodecl)) {
 		err |= re_hprintf(pf, " video_codecs:");
@@ -1762,7 +1954,7 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 		err |= re_hprintf(pf, "\n");
 	}
 	err |= re_hprintf(pf, " call_transfer:%s\n",
-			  account_call_transfer(acc));
+			  account_call_transfer(acc) ? "yes" : "no");
 	err |= re_hprintf(pf, " cert:         %s\n", acc->cert);
 	err |= re_hprintf(pf, " extra:        %s\n",
 			  acc->extra ? acc->extra : "none");
@@ -1805,7 +1997,7 @@ int account_json_api(struct odict *od, struct odict *odcfg,
 	}
 
 	err |= odict_alloc(&obn, 8);
-	for (i=0; i<ARRAY_SIZE(acc->outboundv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 		if (acc->outboundv[i]) {
 			err |= odict_entry_add(obn, "outbound", ODICT_STRING,
 					acc->outboundv[i]);
@@ -1822,6 +2014,8 @@ int account_json_api(struct odict *od, struct odict *odcfg,
 				acc->stun_user);
 	}
 
+	err |= odict_entry_add(odcfg, "rel100_mode", ODICT_STRING,
+			rel100_mode_str(acc->rel100_mode));
 	err |= odict_entry_add(odcfg, "answer_mode", ODICT_STRING,
 			answermode_str(acc->answermode));
 	err |= odict_entry_add(odcfg, "call_transfer", ODICT_BOOL, acc->refer);
@@ -1831,4 +2025,22 @@ int account_json_api(struct odict *od, struct odict *odcfg,
 
 	mem_deref(obn);
 	return err;
+}
+
+
+const char* account_uas_user(const struct account *acc)
+{
+	if (!acc)
+		return NULL;
+
+	return acc->uas_user;
+}
+
+
+const char* account_uas_pass(const struct account *acc)
+{
+	if (!acc)
+		return NULL;
+
+	return acc->uas_pass;
 }

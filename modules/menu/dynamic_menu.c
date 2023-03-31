@@ -248,15 +248,22 @@ static int attended_xfer(struct re_printf *pf, void *arg)
 	}
 
 	menu->xfer_call = ua_call(ua);
+
+	if (!call_supported(menu->xfer_call, REPLACES)) {
+		info ("menu: peer does not support Replaces header\n");
+		goto out;
+	}
+
 	err = call_hold(ua_call(ua), true);
 	if (err)
 		goto out;
 
-	err = ua_connect(ua, &menu->xfer_targ, NULL, carg->prm,
-		VIDMODE_ON);
+	err = ua_connect(ua, &menu->xfer_targ, NULL, carg->prm, VIDMODE_ON);
+
 	if (err)
 		goto out;
 
+	call_set_user_data(menu->xfer_targ, call_user_data(menu->xfer_call));
  out:
 	return err;
 
@@ -324,6 +331,7 @@ static int set_media_ldir(struct re_printf *pf, void *arg)
 	struct pl callid = PL_INIT;
 	char *cid = NULL;
 	bool ok = false;
+	int err;
 
 	const char *usage = "usage: /medialdir"
 			" audio=<inactive, sendonly, recvonly, sendrecv>"
@@ -349,8 +357,8 @@ static int set_media_ldir(struct re_printf *pf, void *arg)
 	if (!pl_isset(&argdir[1]))
 		argdir[1] = argdir[0];
 
-	adir = decode_sdp_enum(&argdir[0]);
-	vdir = decode_sdp_enum(&argdir[1]);
+	adir = sdp_dir_decode(&argdir[0]);
+	vdir = sdp_dir_decode(&argdir[1]);
 	if (adir == SDP_INACTIVE && vdir == SDP_INACTIVE) {
 		(void) re_hprintf(pf, "%s", usage);
 		return EINVAL;
@@ -364,7 +372,10 @@ static int set_media_ldir(struct re_printf *pf, void *arg)
 	if (!call)
 		return EINVAL;
 
-	return call_set_media_direction(call, adir, vdir);
+	err  = call_set_media_estdir(call, adir, vdir);
+	err |= call_set_media_direction(call, adir, vdir);
+
+	return err;
 }
 
 
@@ -396,6 +407,11 @@ static int set_video_dir(struct re_printf *pf, void *arg)
 
 	if (!call)
 		return EINVAL;
+
+	if (!call_refresh_allowed(call)) {
+		(void)re_hprintf(pf, "video update not allowed currently");
+		return EINVAL;
+	}
 
 	if (0 == str_cmp(carg->prm, sdp_dir_name(SDP_INACTIVE))) {
 		err = call_set_video_dir(call, SDP_INACTIVE);
@@ -480,7 +496,7 @@ int dynamic_menu_register(void)
 
 	if (!cmds_find(baresip_cmd, callcmdv))
 		return cmd_register(baresip_cmd,
-			callcmdv, ARRAY_SIZE(callcmdv));
+			callcmdv, RE_ARRAY_SIZE(callcmdv));
 
 	return 0;
 }

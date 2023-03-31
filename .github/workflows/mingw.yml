@@ -1,37 +1,47 @@
 name: MinGW-w64 Test
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
 
 jobs:
   MinGW-w64-build:
     runs-on: ubuntu-latest
 
     steps:
+
+    - name: fix flaky azure mirrors
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        sudo sed -i 's/azure\./de\./' /etc/apt/sources.list
+
     - name: "install packages"
       run: |
         sudo apt-get update && sudo apt-get install -y mingw-w64
 
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
-    - uses: sreimers/pr-dependency-action@v0.3
+    - uses: sreimers/pr-dependency-action@v0.5
       with:
         name: re
         repo: https://github.com/baresip/re
         secret: ${{ secrets.GITHUB_TOKEN }}
 
-    - uses: sreimers/pr-dependency-action@v0.3
+    - uses: sreimers/pr-dependency-action@v0.5
       with:
-        name: rem
-        repo: https://github.com/baresip/rem
+        name: baresip-win32
+        repo: https://github.com/baresip/baresip-win32
         secret: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: "clone baresip-win32 repo"
+    - name: "prepare baresip-win32 repo"
       run: |
-        git clone https://github.com/baresip/baresip-win32.git
         mv re baresip-win32/
-        mv rem baresip-win32/
 
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         path: baresip-win32/baresip
 
@@ -39,14 +49,14 @@ jobs:
       id: openssl
       with:
         path: baresip-win32/openssl
-        key: ${{ runner.os }}-mingw-openssl-1.1.1m
+        key: ${{ runner.os }}-mingw-openssl-3.0.7
 
     - name: "build openssl"
       if: steps.openssl.outputs.cache-hit != 'true'
       run: |
-        wget https://www.openssl.org/source/openssl-1.1.1m.tar.gz
-        tar -xzf openssl-1.1.1m.tar.gz
-        mv openssl-1.1.1m baresip-win32/openssl
+        wget https://www.openssl.org/source/openssl-3.0.7.tar.gz
+        tar -xzf openssl-3.0.7.tar.gz
+        mv openssl-3.0.7 baresip-win32/openssl
         make -j$(nproc) -C baresip-win32 openssl
 
     - name: "build"
@@ -55,7 +65,7 @@ jobs:
     - uses: actions/upload-artifact@v2
       with:
         name: selftest-exe
-        path: baresip-win32/baresip/selftest.exe
+        path: baresip-win32/baresip/build/test/selftest.exe
         retention-days: 1
 
   wintest:
@@ -64,7 +74,7 @@ jobs:
 
     steps:
     - uses: actions/download-artifact@v2
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         path: baresip
 

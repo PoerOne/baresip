@@ -24,7 +24,7 @@
 
 /* shared state */
 struct selfview {
-	struct lock *lock;          /**< Protect frame         */
+	mtx_t lock;                 /**< Protect frame         */
 	struct vidframe *frame;     /**< Copy of encoded frame */
 };
 
@@ -48,10 +48,10 @@ static void destructor(void *arg)
 {
 	struct selfview *st = arg;
 
-	lock_write_get(st->lock);
+	mtx_lock(&st->lock);
 	mem_deref(st->frame);
-	lock_rel(st->lock);
-	mem_deref(st->lock);
+	mtx_unlock(&st->lock);
+	mtx_destroy(&st->lock);
 }
 
 
@@ -90,9 +90,9 @@ static int selfview_alloc(struct selfview **selfviewp, void **ctx)
 		if (!selfview)
 			return ENOMEM;
 
-		err = lock_alloc(&selfview->lock);
+		err = mtx_init(&selfview->lock, mtx_plain) != thrd_success;
 		if (err)
-			return err;
+			return ENOMEM;
 
 		*ctx = selfview;
 		*selfviewp = selfview;
@@ -122,7 +122,29 @@ static int encode_update(struct vidfilt_enc_st **stp, void **ctx,
 		return ENOMEM;
 
 	err = selfview_alloc(&st->selfview, ctx);
+	if (err)
+		goto out;
 
+	if (0 == str_casecmp(vf->name, "selfview_window")) {
+
+		struct list *lst = baresip_vidispl();
+
+		err = vidisp_alloc(&st->disp, lst, NULL, NULL,
+				   NULL, NULL, NULL);
+		if (err)
+			goto out;
+
+		st->vd = vidisp_find(lst, NULL);
+		if (!st->vd) {
+			err = ENOENT;
+			goto out;
+		}
+
+		info("selfview: created video display (%s)\n",
+		     st->vd->name);
+	}
+
+ out:
 	if (err)
 		mem_deref(st);
 	else
@@ -163,24 +185,15 @@ static int encode_win(struct vidfilt_enc_st *st, struct vidframe *frame,
 		      uint64_t *timestamp)
 {
 	struct selfview_enc *enc = (struct selfview_enc *)st;
-	int err;
+	int err = 0;
 
 	if (!frame)
 		return 0;
 
-	if (!enc->disp) {
+	if (enc->vd && enc->vd->disph)
+		err = enc->vd->disph(enc->disp, "Selfview", frame, *timestamp);
 
-		struct list *lst = baresip_vidispl();
-
-		err = vidisp_alloc(&enc->disp, lst,
-				   NULL, NULL, NULL, NULL, NULL);
-		if (err)
-			return err;
-
-		enc->vd = vidisp_find(lst, NULL);
-	}
-
-	return enc->vd->disph(enc->disp, "Selfview", frame, *timestamp);
+	return err;
 }
 
 
@@ -195,7 +208,7 @@ static int encode_pip(struct vidfilt_enc_st *st, struct vidframe *frame,
 	if (!frame)
 		return 0;
 
-	lock_write_get(selfview->lock);
+	mtx_lock(&selfview->lock);
 	if (!selfview->frame) {
 		struct vidsz sz;
 
@@ -212,7 +225,7 @@ static int encode_pip(struct vidfilt_enc_st *st, struct vidframe *frame,
 	}
 	if (!err)
 		vidconv(selfview->frame, frame, NULL);
-	lock_rel(selfview->lock);
+	mtx_unlock(&selfview->lock);
 
 	return err;
 }
@@ -228,7 +241,7 @@ static int decode_pip(struct vidfilt_dec_st *st, struct vidframe *frame,
 	if (!frame)
 		return 0;
 
-	lock_read_get(sv->lock);
+	mtx_lock(&sv->lock);
 	if (sv->frame) {
 		struct vidrect rect;
 
@@ -248,7 +261,7 @@ static int decode_pip(struct vidfilt_dec_st *st, struct vidframe *frame,
 		vidframe_draw_rect(frame, rect.x, rect.y, rect.w, rect.h,
 				   127, 127, 127);
 	}
-	lock_rel(sv->lock);
+	mtx_unlock(&sv->lock);
 
 	return 0;
 }

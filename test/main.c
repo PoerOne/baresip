@@ -23,7 +23,6 @@ struct test {
 static const struct test tests[] = {
 	TEST(test_account),
 	TEST(test_account_uri_complete),
-	TEST(test_aulevel),
 	TEST(test_call_answer),
 	TEST(test_call_answer_hangup_a),
 	TEST(test_call_answer_hangup_b),
@@ -46,6 +45,7 @@ static const struct test tests[] = {
 	TEST(test_call_transfer_fail),
 	TEST(test_call_attended_transfer),
 	TEST(test_call_video),
+	TEST(test_call_change_videodir),
 	TEST(test_call_webrtc),
 	TEST(test_call_bundle),
 	TEST(test_call_ipv6ll),
@@ -59,6 +59,7 @@ static const struct test tests[] = {
 	TEST(test_stunuri),
 	TEST(test_ua_alloc),
 	TEST(test_ua_options),
+	TEST(test_ua_refer),
 	TEST(test_ua_register),
 	TEST(test_ua_register_auth),
 	TEST(test_ua_register_auth_dns),
@@ -94,7 +95,7 @@ static int run_tests(void)
 	size_t i;
 	int err;
 
-	for (i=0; i<ARRAY_SIZE(tests); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(tests); i++) {
 
 		re_printf("[ RUN      ] %s\n", tests[i].name);
 
@@ -116,7 +117,7 @@ static void test_listcases(void)
 {
 	size_t i, n;
 
-	n = ARRAY_SIZE(tests);
+	n = RE_ARRAY_SIZE(tests);
 
 	(void)re_printf("\n%zu test cases:\n", n);
 
@@ -135,7 +136,7 @@ static const struct test *find_test(const char *name)
 {
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(tests); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(tests); i++) {
 
 		if (0 == str_casecmp(name, tests[i].name))
 			return &tests[i];
@@ -171,6 +172,7 @@ static const char *modconfig =
 
 int main(int argc, char *argv[])
 {
+	struct memstat mstat;
 	struct config *config;
 	size_t i, ntests;
 	struct sa sa;
@@ -216,11 +218,11 @@ int main(int argc, char *argv[])
 	if (argc >= (optind + 1))
 		ntests = argc - optind;
 	else
-		ntests = ARRAY_SIZE(tests);
+		ntests = RE_ARRAY_SIZE(tests);
 #else
 	(void)argc;
 	(void)argv;
-	ntests = ARRAY_SIZE(tests);
+	ntests = RE_ARRAY_SIZE(tests);
 #endif
 
 	re_printf("running baresip selftest version %s with %zu tests\n",
@@ -301,10 +303,18 @@ int main(int argc, char *argv[])
 
 	baresip_close();
 
-	libre_close();
+	re_thread_async_close();
 
 	tmr_debug();
+
+	libre_close();
+
 	mem_debug();
+
+	if (0 == mem_get_stat(&mstat)) {
+		if (mstat.bytes_cur || mstat.blocks_cur)
+			return 2;
+	}
 
 	return err;
 }

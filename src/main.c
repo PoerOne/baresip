@@ -13,6 +13,11 @@
 #include <re.h>
 #include <baresip.h>
 
+#define DEBUG_MODULE ""
+#define DEBUG_LEVEL 0
+#include <re_dbg.h>
+
+enum { ASYNC_WORKERS = 4 };
 
 static void signal_handler(int sig)
 {
@@ -71,6 +76,8 @@ static void usage(void)
 			 "\t-n <net_if>      Specify network interface\n"
 			 "\t-u <parameters>  Extra UA parameters\n"
 			 "\t-v               Verbose debug\n"
+			 "\t-T               Enable timestamps log\n"
+			 "\t-c               Disable colored log\n"
 			 );
 }
 
@@ -91,6 +98,9 @@ int main(int argc, char *argv[])
 	size_t modc = 0;
 	size_t i;
 	uint32_t tmo = 0;
+	int dbg_level = DBG_INFO;
+	enum dbg_flags dbg_flags = DBG_ANSI;
+
 	int err;
 
 	/*
@@ -113,7 +123,7 @@ int main(int argc, char *argv[])
 
 #ifdef HAVE_GETOPT
 	for (;;) {
-		const int c = getopt(argc, argv, "46a:de:f:p:hu:n:vst:m:");
+		const int c = getopt(argc, argv, "46a:de:f:p:hu:n:vst:m:Tc");
 		if (0 > c)
 			break;
 
@@ -143,9 +153,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'e':
-			if (execmdc >= ARRAY_SIZE(execmdv)) {
+			if (execmdc >= RE_ARRAY_SIZE(execmdv)) {
 				warning("max %zu commands\n",
-					ARRAY_SIZE(execmdv));
+					RE_ARRAY_SIZE(execmdv));
 				err = EINVAL;
 				goto out;
 			}
@@ -157,9 +167,9 @@ int main(int argc, char *argv[])
 			break;
 
 		case 'm':
-			if (modc >= ARRAY_SIZE(modv)) {
+			if (modc >= RE_ARRAY_SIZE(modv)) {
 				warning("max %zu modules\n",
-					ARRAY_SIZE(modv));
+					RE_ARRAY_SIZE(modv));
 				err = EINVAL;
 				goto out;
 			}
@@ -188,6 +198,17 @@ int main(int argc, char *argv[])
 
 		case 'v':
 			log_enable_debug(true);
+			dbg_level = DBG_DEBUG;
+			break;
+
+		case 'T':
+			log_enable_timestamps(true);
+			dbg_flags |= DBG_TIME;
+			break;
+
+		case 'c':
+			log_enable_color(false);
+			dbg_flags &= ~DBG_ANSI;
 			break;
 
 		default:
@@ -199,11 +220,14 @@ int main(int argc, char *argv[])
 	(void)argv;
 #endif
 
+	dbg_init(dbg_level, dbg_flags);
 	err = conf_configure();
 	if (err) {
 		warning("main: configure failed: %m\n", err);
 		goto out;
 	}
+
+	re_thread_async_init(ASYNC_WORKERS);
 
 	/*
 	 * Set the network interface before initializing the config
@@ -319,10 +343,14 @@ int main(int argc, char *argv[])
 	debug("main: unloading modules..\n");
 	mod_close();
 
+	re_thread_async_close();
+
+	/* Check for open timers */
+	tmr_debug();
+
 	libre_close();
 
 	/* Check for memory leaks */
-	tmr_debug();
 	mem_debug();
 
 	return err;

@@ -220,7 +220,7 @@ int vp9_encode(struct videnc_state *ves, bool update,
 	vpx_codec_err_t res;
 	vpx_image_t *img = NULL;
 	vpx_img_fmt_t img_fmt;
-	int err, i;
+	int err = 0, i;
 
 	if (!ves || !frame)
 		return EINVAL;
@@ -313,4 +313,26 @@ int vp9_encode(struct videnc_state *ves, bool update,
 		vpx_img_free(img);
 
 	return err;
+}
+
+
+int vp9_encode_packetize(struct videnc_state *ves,
+			 const struct vidpacket *pkt)
+{
+	uint64_t rtp_ts;
+	int err;
+
+	if (!ves || !pkt)
+		return EINVAL;
+
+	++ves->picid;
+
+	rtp_ts = video_calc_rtp_timestamp_fix(pkt->timestamp);
+
+	err = packetize(ves, true, pkt->buf, pkt->size,
+			ves->pktsize, ves->picid, rtp_ts);
+	if (err)
+		return err;
+
+	return 0;
 }

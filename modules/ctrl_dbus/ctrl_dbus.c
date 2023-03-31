@@ -65,6 +65,7 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <re.h>
+#include <re_atomic.h>
 #include <baresip.h>
 #include "baresipbus.h"
 
@@ -76,20 +77,20 @@
 
 
 struct ctrl_st {
-	pthread_t tid;              /**< Thread ID of main loop  */
+	thrd_t thrd;                /**< Thread for GMainLoop    */
 	GMainLoop *loop;            /**< Main loop               */
-	bool run;                   /**< Main loop run flag      */
+	RE_ATOMIC bool run;         /**< Main loop run flag      */
 
 	guint bus_owner;            /**< Handle of dbus owner    */
 	DBusBaresip *interface;     /**< dbus interface          */
 
 	char *command;              /**< Current command                     */
-	struct mqueue *mqueue;      /**< Command queue                       */
+	struct mqueue *mqueue;      /**< Queue processed in main thread      */
 	struct mbuf *mb;            /**< Command response buffer             */
 
 	struct {
-		pthread_mutex_t mutex;
-		pthread_cond_t cond;
+		mtx_t mtx;
+		cnd_t cnd;
 	} wait;
 };
 
@@ -103,7 +104,7 @@ static int print_handler(const char *p, size_t size, void *arg)
 }
 
 
-static void command_handler(int id, void *data, void *arg)
+static void command_handler(void *data, void *arg)
 {
 	struct ctrl_st *st = arg;
 
@@ -138,10 +139,50 @@ static void command_handler(int id, void *data, void *arg)
 	mbuf_set_pos(st->mb, 0);
 
 out:
-	pthread_mutex_lock(&st->wait.mutex);
+	mtx_lock(&st->wait.mtx);
 	st->command = mem_deref(st->command);
-	pthread_cond_signal(&st->wait.cond);
-	pthread_mutex_unlock(&st->wait.mutex);
+	cnd_signal(&st->wait.cnd);
+	mtx_unlock(&st->wait.mtx);
+}
+
+
+struct modev {
+	char *event;
+	char *txt;
+};
+
+
+static void modev_destructor(void *arg)
+{
+	struct modev *d = arg;
+
+	mem_deref(d->event);
+	mem_deref(d->txt);
+}
+
+
+static void send_event(void *data, void *arg)
+{
+	struct modev *modev = data;
+	(void)arg;
+
+	module_event("ctrl_dbus", modev->event, NULL, NULL, modev->txt);
+	mem_deref(modev);
+}
+
+
+static void queue_handler(int id, void *data, void *arg)
+{
+	switch (id) {
+		case 0:
+			command_handler(data, arg);
+			break;
+		case 1:
+			send_event(data, arg);
+			break;
+		default:
+			break;
+	}
 }
 
 
@@ -157,12 +198,12 @@ on_handle_invoke(DBusBaresip *interface,
 
 	str_dup(&st->command, command);
 
-	pthread_mutex_lock(&st->wait.mutex);
+	mtx_lock(&st->wait.mtx);
 	err = mqueue_push(st->mqueue, 0, NULL);
-	if (!err)
-		pthread_cond_wait(&st->wait.cond, &st->wait.mutex);
+	while (!err && st->command)
+		cnd_wait(&st->wait.cnd, &st->wait.mtx);
 
-	pthread_mutex_unlock(&st->wait.mutex);
+	mtx_unlock(&st->wait.mtx);
 
 	if (!err && st->mb) {
 		err = mbuf_strdup(st->mb, &response, mbuf_get_left(st->mb));
@@ -180,14 +221,6 @@ on_handle_invoke(DBusBaresip *interface,
 	}
 
 	return true;
-}
-
-
-static int send_event(struct ctrl_st *st, const char *eclass,
-		const char *etype, const char *param) {
-
-	dbus_baresip_emit_event(st->interface, eclass, etype, param);
-	return 0;
 }
 
 
@@ -228,7 +261,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 
 	mbuf_write_u8(buf, 0);
 	mbuf_set_pos(buf, 0);
-	send_event(st, class ? class : "other", etype,
+	dbus_baresip_emit_event(st->interface, class ? class : "other", etype,
 			(const char *) mbuf_buf(buf));
 
  out:
@@ -280,10 +313,10 @@ out:
 static void ctrl_destructor(void *arg)
 {
 	struct ctrl_st *st = arg;
-	if (st->run) {
-		st->run = false;
+	if (re_atomic_rlx(&st->run)) {
+		re_atomic_rlx_set(&st->run, false);
 		g_main_loop_quit(st->loop);
-		pthread_join(st->tid, NULL);
+		thrd_join(st->thrd, NULL);
 	}
 
 	if (st == m_st)
@@ -298,21 +331,20 @@ static void ctrl_destructor(void *arg)
 
 	g_main_loop_unref(st->loop);
 
-	pthread_mutex_destroy(&st->wait.mutex);
-	pthread_cond_destroy(&st->wait.cond);
+	mtx_destroy(&st->wait.mtx);
+	cnd_destroy(&st->wait.cnd);
 	mem_deref(st->mqueue);
 }
 
 
-static void *thread(void *arg)
+static int thread(void *arg)
 {
 	struct ctrl_st *st = arg;
 
-	st->run = true;
-	while (st->run)
+	while (re_atomic_rlx(&st->run))
 		g_main_loop_run(st->loop);
 
-	return NULL;
+	return 0;
 }
 
 
@@ -328,8 +360,8 @@ static int ctrl_alloc(struct ctrl_st **stp)
 	if (!st)
 		return ENOMEM;
 
-	pthread_mutex_init(&st->wait.mutex, NULL);
-	pthread_cond_init(&st->wait.cond, NULL);
+	mtx_init(&st->wait.mtx, mtx_plain);
+	cnd_init(&st->wait.cnd);
 
 	st->loop = g_main_loop_new(NULL, false);
 	if (!st->loop) {
@@ -337,13 +369,14 @@ static int ctrl_alloc(struct ctrl_st **stp)
 		goto out;
 	}
 
-	err = mqueue_alloc(&st->mqueue, command_handler, st);
+	err  = mqueue_alloc(&st->mqueue, queue_handler, st);
 	if (err)
 		goto out;
 
-	err = pthread_create(&st->tid, NULL, thread, st);
+	re_atomic_rlx_set(&st->run, true);
+	err = thread_create_name(&st->thrd, "ctrl_dbus", thread, st);
 	if (err)
-		st->run = false;
+		re_atomic_rlx_set(&st->run, false);
 
 out:
 	if (err)
@@ -360,6 +393,9 @@ on_name_acquired(GDBusConnection *connection, const gchar *name, gpointer arg)
 {
 	GError *error;
 	struct ctrl_st *st = arg;
+	struct modev *modev;
+	const char fmt[] = "dbus interface %s exported";
+	int err;
 
 	st->interface = dbus_baresip_skeleton_new();
 	g_signal_connect (st->interface, "handle-invoke",
@@ -373,8 +409,17 @@ on_name_acquired(GDBusConnection *connection, const gchar *name, gpointer arg)
 	}
 
 	info("ctrl_dbus: dbus interface %s exported\n", name);
-	module_event("ctrl_dbus", "exported", NULL, NULL,
-			"dbus interface %s exported", name);
+
+	modev = mem_zalloc(sizeof(*modev), modev_destructor);
+	if (!modev)
+		return;
+
+	err  = str_dup(&modev->event, "exported");
+	err |= re_sdprintf(&modev->txt, fmt, name);
+	if (err)
+		return;
+
+	(void)mqueue_push(st->mqueue, 1, modev);
 }
 
 

@@ -6,7 +6,7 @@ baresip README
 
 
 Baresip is a portable and modular SIP User-Agent with audio and video support.
-Copyright (c) 2010 - 2022 Alfred E. Heggestad and Contributors
+Copyright (c) 2010 - 2023 Alfred E. Heggestad and Contributors
 Distributed under BSD license
 
 
@@ -76,7 +76,6 @@ Distributed under BSD license
   - G.711
   - G.722
   - G.726
-  - GSM
   - L16
   - MPA
   - Opus
@@ -92,7 +91,7 @@ Distributed under BSD license
   - Windows winwave audio-driver
 
 * Video:
-  - Support for H.263, H.264, H.265, VP8, VP9, AV1 Video
+  - Support for H.264, H.265, VP8, VP9, AV1 Video
   - Configurable resolution/framerate/bitrate
   - Configurable video input/output
   - Support for asymmetric video
@@ -101,7 +100,6 @@ Distributed under BSD license
 
 * Video-codecs:
   - AV1
-  - H.263
   - H.264
   - H.265
   - VP8
@@ -142,7 +140,7 @@ Distributed under BSD license
 
 ## Building
 
-baresip is using GNU makefiles, and the following packages must be
+baresip is using CMake, and the following packages must be
 installed before building:
 
 * [libre](https://github.com/baresip/re)
@@ -156,29 +154,50 @@ for a full guide.
 ### Build with debug enabled
 
 ```
-$ make
-$ sudo make install
+$ cmake -B build
+$ cmake --build build -j
+$ cmake --install build
 ```
 
 ### Build with release
 
 ```
-$ make RELEASE=1
-$ sudo make RELEASE=1 install
+$ cmake -B build -DCMAKE_BUILD_TYPE=Release 
+$ cmake --build build -j
+```
+
+### Build with selected modules
+
+```
+$ cmake -B build -DMODULES="menu;account;g711"
+$ cmake --build build -j
+```
+
+### Build with custom app modules
+
+```
+$ cmake -B build -DAPP_MODULES_DIR=../baresip-apps/modules -DAPP_MODULES="auloop;vidloop"
+$ cmake --build build -j
 ```
 
 ### Build with clang compiler
 
 ```
-$ make CC=clang
-$ sudo make CC=clang install
+$ cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+$ cmake --build build -j
+```
+### Build static
+
+```
+$ cmake -B build -DSTATIC=ON
+$ cmake --build build -j
 ```
 
 Modules will be built if external dependencies are installed.
 After building you can start baresip like this:
 
 ```
-$ baresip
+$ build/baresip
 ```
 
 The config files in $HOME/.baresip are automatically generated
@@ -211,7 +230,7 @@ Patches can be sent via Github
 * IPv4 and IPv6 support
 * RFC-compliancy
 * Robust, fast, low footprint
-* Portable C89 and C99 source code
+* Portable C99 and C11 source code
 
 
 ## Modular Plugin Architecture:
@@ -225,15 +244,18 @@ aubridge      Audio bridge module
 auconv        Audio sample format converter
 audiounit     AudioUnit audio driver for MacOSX/iOS
 aufile        Audio module for using a WAV-file as audio input
+auresamp      Audio resampler
 ausine        Audio sine wave input module
 av1           AV1 video codec
 avcapture     Video source using iOS AVFoundation video capture
 avcodec       Video codec using FFmpeg/libav libavcodec
+avfilter      Video filter using FFmpeg libavfilter
 avformat      Video source using FFmpeg/libav libavformat
 codec2        Codec2 low bit rate speech codec
 cons          UDP/TCP console UI driver
 contact       Contacts module
 coreaudio     Apple macOS Coreaudio driver
+ctrl_dbus     Control interface using DBUS
 ctrl_tcp      TCP control interface using JSON payload
 debug_cmd     Debug commands
 directfb      DirectFB video display module
@@ -247,27 +269,26 @@ g711          G.711 audio codec
 g722          G.722 audio codec
 g7221         G.722.1 audio codec
 g726          G.726 audio codec
-gsm           GSM audio codec
 gst           Gstreamer audio source
-gst_video     Gstreamer video codec
-gtk           GTK+ 2.0 UI
+gtk           GTK+ 3 menu-based UI
 gzrtp         ZRTP module using GNU ZRTP C++ library
 httpd         HTTP webserver UI-module
-i2s           I2S (Inter-IC Sound) audio driver
+httpreq       HTTP request module
 ice           ICE protocol for NAT Traversal
 jack          JACK Audio Connection Kit audio-driver
 l16           L16 audio codec
 menu          Interactive menu
+mixausrc      Mixes another audio source into audio stream
 mixminus      Mixes N-1 audio streams for conferencing
 mpa           MPA Speech and Audio Codec
-multicast     Multicast RTP send and receive
 mqtt          MQTT (Message Queue Telemetry Transport) module
+multicast     Multicast RTP send and receive
 mwi           Message Waiting Indication
 natpmp        NAT Port Mapping Protocol (NAT-PMP) module
 netroam       Detects and applies changes of the local network addresses
-omx           OpenMAX IL video display module
 opensles      OpenSLES audio driver
 opus          OPUS Interactive audio codec
+opus_multistream    OPUS multistream audio codec
 pcp           Port Control Protocol (PCP) module
 plc           Packet Loss Concealment (PLC) using spandsp
 portaudio     Portaudio driver
@@ -276,9 +297,9 @@ presence      Presence module
 rtcpsummary   RTCP summary module
 sdl           Simple DirectMedia Layer 2.0 (SDL) video output driver
 selfview      Video selfview module
+serreg        Serial registration
 snapshot      Save video-stream as PNG images
 sndfile       Audio dumper using libsndfile
-sndio         Audio driver for OpenBSD
 srtp          Secure RTP encryption (SDES) using libre SRTP-stack
 stdio         Standard input/output UI driver
 stun          Session Traversal Utilities for NAT (STUN) module
@@ -293,19 +314,19 @@ vp8           VP8 video codec
 vp9           VP9 video codec
 vumeter       Display audio levels in console
 webrtc_aec    Acoustic Echo Cancellation (AEC) using WebRTC SDK
+webrtc_aecm   Acoustic Echo Cancellation (AEC) mobile using WebRTC SDK
 wincons       Console input driver for Windows
 winwave       Audio driver for Windows
 x11           X11 video output driver
-zrtp          ZRTP media encryption module
 ```
 
 
 ## IETF RFC/I-Ds:
 
-* RFC 2190  RTP Payload Format for H.263 Video Streams (Historic)
 * RFC 2250  RTP Payload Format for the mpa Speech and Audio Codec
-* RFC 2429  RTP Payload Format for 1998 ver of ITU-T Rec. H.263 Video (H.263+)
 * RFC 3016  RTP Payload Format for MPEG-4 Audio/Visual Streams
+* RFC 3262  Reliability of Provisional Responses for SIP
+* RFC 3311  SIP UPDATE Method
 * RFC 3428  SIP Extension for Instant Messaging
 * RFC 3711  The Secure Real-time Transport Protocol (SRTP)
 * RFC 3640  RTP Payload Format for Transport of MPEG-4 Elementary Streams
@@ -320,7 +341,6 @@ zrtp          ZRTP media encryption module
 * RFC 4574  The SDP Label Attribute
 * RFC 4585  Extended RTP Profile for RTCP-Based Feedback (RTP/AVPF)
 * RFC 4587  RTP Payload Format for H.261 Video Streams
-* RFC 4629  RTP Payload Format for ITU-T Rec. H.263 Video
 * RFC 4796  The SDP Content Attribute
 * RFC 4867  RTP Payload Format for the AMR and AMR-WB Audio Codecs
 * RFC 4961  Symmetric RTP / RTP Control Protocol (RTCP)
@@ -356,13 +376,12 @@ zrtp          ZRTP media encryption module
 
 ## Supported platforms:
 
-* Android (5.0 or later)
-* Apple Mac OS X and iOS
-* FreeBSD
-* Linux
-* NetBSD
+* Android (6.0 or later)
+* Apple macOS (10.12+)
+* Apple iOS 9.0 or later
+* Linux (kernel 3.0 or later, and glibc 2.5.x or later)
 * OpenBSD
-* Windows (mingw and VS2015)
+* Windows 10 or later (mingw and VS2019)
 
 
 ### Supported versions of C Standard library
@@ -370,6 +389,7 @@ zrtp          ZRTP media encryption module
 * Android bionic
 * BSD libc
 * GNU C Library (glibc)
+* Musl
 * Windows C Run-Time Libraries (CRT)
 * uClibc
 
@@ -377,7 +397,7 @@ zrtp          ZRTP media encryption module
 ### Supported compilers:
 
 * gcc 4.x or later
-* ms vc2003 compiler
+* ms VS2019 compiler
 * clang 3.x or later
 
 
@@ -385,6 +405,7 @@ zrtp          ZRTP media encryption module
 
 * OpenSSL version 1.1.0
 * OpenSSL version 1.1.1
+* OpenSSL version 3.0.x
 * LibreSSL version 2.x
 * LibreSSL version 3.x
 

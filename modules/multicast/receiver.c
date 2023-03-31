@@ -8,11 +8,6 @@
 #include <rem.h>
 #include <baresip.h>
 
-#include <stdlib.h>
-#ifdef HAVE_PTHREAD
-#include <pthread.h>
-#endif
-
 #include "multicast.h"
 
 #define DEBUG_MODULE "mcreceiver"
@@ -21,7 +16,7 @@
 
 
 struct list mcreceivl = LIST_INIT;
-struct lock *mcreceivl_lock = NULL;
+static mtx_t mcreceivl_lock;
 
 
 enum {
@@ -54,6 +49,7 @@ struct mcreceiver {
 	struct tmr timeout;
 
 	enum state state;
+	bool muted;
 	bool enable;
 };
 
@@ -215,9 +211,23 @@ static void resume_uag_state(void)
  */
 static int player_stop_start(struct mcreceiver *mcreceiver)
 {
-	mcplayer_stop();
+	mcplayer_fadeout();
+	return mcplayer_start(mcreceiver->ac);
+}
+
+
+static void mcreceiver_stop(struct mcreceiver *mcreceiver)
+{
+	mcreceiver->state = RECEIVING;
+
+	module_event("multicast",
+		     "receiver stopped playing", NULL, NULL,
+		     "addr=%J prio=%d enabled=%d state=%s",
+		     &mcreceiver->addr, mcreceiver->prio,
+		     mcreceiver->enable,
+		     state_str(mcreceiver->state));
+
 	jbuf_flush(mcreceiver->jbuf);
-	return mcplayer_start(mcreceiver->jbuf, mcreceiver->ac);
 }
 
 
@@ -238,9 +248,9 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 	if (!mcreceiver)
 		return EINVAL;
 
-	err = lock_write_try(mcreceivl_lock);
+	err = mtx_trylock(&mcreceivl_lock) != thrd_success;
 	if (err)
-		return err;
+		return ENOMEM;
 
 	if (mcreceiver->state == LISTENING) {
 		mcreceiver->state = RECEIVING;
@@ -268,8 +278,10 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 	}
 
 	if (mcreceiver->prio >= multicast_callprio() && uag_call_count()) {
-		mcreceiver->state = RECEIVING;
-		mcplayer_stop();
+		if (mcreceiver->state == RUNNING) {
+			mcreceiver_stop(mcreceiver);
+			mcplayer_stop();
+		}
 		goto out;
 	}
 	else if (mcreceiver->prio < multicast_callprio()) {
@@ -282,9 +294,17 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 		for (leua = list_head(uag_list()); leua; leua = leua->next) {
 			struct le *lecall;
 			ua = leua->data;
-			for (lecall = list_head(ua_calls(ua)); lecall;
-				lecall = lecall->next) {
+			lecall = list_head(ua_calls(ua));
+			while (lecall) {
 				struct call *call = lecall->data;
+				lecall = lecall->next;
+
+				if (call_state(call) !=
+					CALL_STATE_ESTABLISHED) {
+					ua_hangup(ua, call, 0, NULL);
+					continue;
+				}
+
 				if (!call_is_onhold(call))
 					call_hold(call, true);
 			}
@@ -293,9 +313,12 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 
 	le = list_apply(&mcreceivl, true, mcreceiver_running, NULL);
 	if (!le) {
+		err = player_stop_start(mcreceiver);
+		if (err)
+			goto out;
+
 		mcreceiver->state = RUNNING;
 		mcreceiver->ssrc = ssrc;
-		err = player_stop_start(mcreceiver);
 
 		info ("multicast receiver: start addr=%J prio=%d enabled=%d "
 			"state=%s\n", &mcreceiver->addr, mcreceiver->prio,
@@ -318,8 +341,8 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 		if (hprio->state == IGNORED)
 			hprio->state = RUNNING;
 
+		mcplayer_fadein(true);
 		mcreceiver->ssrc = ssrc;
-		err = player_stop_start(mcreceiver);
 
 		info ("multicast receiver: restart addr=%J prio=%d enabled=%d "
 			"state=%s\n", &mcreceiver->addr, mcreceiver->prio,
@@ -336,11 +359,15 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 		goto out;
 	}
 
+	err = player_stop_start(mcreceiver);
+	if (err)
+		goto out;
+
 	hprio->state = RECEIVING;
+	jbuf_flush(hprio->jbuf);
 	mcreceiver->state = RUNNING;
 	mcreceiver->ssrc = ssrc;
 
-	err = player_stop_start(mcreceiver);
 
 	info ("multicast receiver: start addr=%J prio=%d enabled=%d "
 		"state=%s\n", &mcreceiver->addr, mcreceiver->prio,
@@ -352,7 +379,7 @@ static int prio_handling(struct mcreceiver *mcreceiver, uint32_t ssrc)
 		state_str(mcreceiver->state));
 
   out:
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	return err;
 }
 
@@ -374,17 +401,45 @@ static void timeout_handler(void *arg)
 		&mcreceiver->addr, mcreceiver->prio, mcreceiver->enable,
 		state_str(mcreceiver->state));
 
-	lock_write_get(mcreceivl_lock);
-	if (mcreceiver->state == RUNNING)
+	mtx_lock(&mcreceivl_lock);
+	if (mcreceiver->state == RUNNING) {
 		mcplayer_stop();
+		jbuf_flush(mcreceiver->jbuf);
+	}
 
 	mcreceiver->state = LISTENING;
+	mcreceiver->muted = false;
 	mcreceiver->ssrc = 0;
 	mcreceiver->ac   = 0;
 	resume_uag_state();
 
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	return;
+}
+
+
+/**
+ * Decode RTP packet
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+static int player_decode(struct mcreceiver *mcreceiver)
+{
+	void *mb = NULL;
+	struct rtp_header hdr;
+	int jerr;
+	int err;
+
+	jerr = jbuf_get(mcreceiver->jbuf, &hdr, &mb);
+	if (jerr && jerr != EAGAIN)
+		return jerr;
+
+	err = mcplayer_decode(&hdr, mb, jerr == EAGAIN);
+	mb = mem_deref(mb);
+	if (err)
+		return err;
+
+	return jerr;
 }
 
 
@@ -416,9 +471,21 @@ static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
 	if (err)
 		goto out;
 
-	err = jbuf_put(mcreceiver->jbuf, hdr, mb);
-	if (err)
-		return;
+	if (mcreceiver->state == RUNNING) {
+		if (mcreceiver->muted && mcplayer_fadeout_done()) {
+			mcplayer_stop();
+			jbuf_flush(mcreceiver->jbuf);
+			goto out;
+		}
+
+		err = jbuf_put(mcreceiver->jbuf, hdr, mb);
+		if (err)
+			return;
+
+		if (player_decode(mcreceiver) == EAGAIN) {
+			(void) player_decode(mcreceiver);
+		}
+	}
 
   out:
 	tmr_start(&mcreceiver->timeout, TIMEOUT, timeout_handler, mcreceiver);
@@ -468,7 +535,7 @@ void mcreceiver_enprio(uint32_t prio)
 	if (!prio)
 		return;
 
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	LIST_FOREACH(&mcreceivl, le) {
 		mcreceiver = le->data;
 
@@ -479,13 +546,13 @@ void mcreceiver_enprio(uint32_t prio)
 			mcreceiver->enable = false;
 
 			if (mcreceiver->state == RUNNING) {
-				mcreceiver->state = RECEIVING;
+				mcreceiver_stop(mcreceiver);
 				mcplayer_stop();
 			}
 		}
 	}
 
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	resume_uag_state();
 }
 
@@ -505,7 +572,7 @@ void mcreceiver_enrangeprio(uint32_t priol, uint32_t prioh, bool en)
 	if (!priol || !prioh)
 		return;
 
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	LIST_FOREACH(&mcreceivl, le) {
 		mcreceiver = le->data;
 
@@ -513,13 +580,13 @@ void mcreceiver_enrangeprio(uint32_t priol, uint32_t prioh, bool en)
 			mcreceiver->enable = en;
 
 			if (mcreceiver->state == RUNNING) {
-				mcreceiver->state = RECEIVING;
+				mcreceiver_stop(mcreceiver);
 				mcplayer_stop();
 			}
 		}
 	}
 
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	resume_uag_state();
 }
 
@@ -534,12 +601,15 @@ void mcreceiver_enable(bool enable)
 	struct le *le;
 	struct mcreceiver *mcreceiver;
 
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	LIST_FOREACH(&mcreceivl, le) {
 		mcreceiver = le->data;
 		mcreceiver->enable = enable;
+		if (mcreceiver->state == RUNNING)
+			mcreceiver_stop(mcreceiver);
 	}
-	lock_rel(mcreceivl_lock);
+
+	mtx_unlock(&mcreceivl_lock);
 	mcplayer_stop();
 	resume_uag_state();
 }
@@ -574,9 +644,9 @@ int mcreceiver_chprio(struct sa *addr, uint32_t prio)
 	}
 
 	mcreceiver = le->data;
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	mcreceiver->prio = prio;
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	resume_uag_state();
 	return 0;
 }
@@ -608,11 +678,12 @@ int mcreceiver_prioignore(uint32_t prio)
 	if (mcreceiver->state == IGNORED)
 		return 0;
 
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	switch (mcreceiver->state) {
 		case RUNNING:
 			mcreceiver->state = IGNORED;
 			mcplayer_stop();
+			jbuf_flush(mcreceiver->jbuf);
 			break;
 		case RECEIVING:
 			mcreceiver->state = IGNORED;
@@ -624,8 +695,49 @@ int mcreceiver_prioignore(uint32_t prio)
 			break;
 	}
 
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	resume_uag_state();
+	return err;
+}
+
+
+/**
+ * Toggle mute flag of the given priority multicast receiver
+ *
+ * @param prio Priority
+ *
+ * @return int 0 if success, errorcode otherwise
+ */
+int mcreceiver_mute(uint32_t prio)
+{
+	struct le *le;
+	struct mcreceiver *mcreceiver;
+	int err = 0;
+
+	if (!prio)
+		return EINVAL;
+
+	le = list_apply(&mcreceivl, true, mcreceiver_prio_cmp, &prio);
+	if (!le) {
+		warning ("multicast receiver: priority %d not found\n", prio);
+		return EINVAL;
+	}
+
+	mcreceiver = le->data;
+	mtx_lock(&mcreceivl_lock);
+	mcreceiver->muted = !mcreceiver->muted;
+	if (mcreceiver->state == RUNNING) {
+		if (mcreceiver->muted) {
+			mcplayer_fadeout();
+		}
+		else {
+			mcplayer_fadein(false);
+			err = mcplayer_start(mcreceiver->ac);
+			if (err == EINPROGRESS)
+				err = 0;
+		}
+	}
+	mtx_unlock(&mcreceivl_lock);
 	return err;
 }
 
@@ -635,11 +747,11 @@ int mcreceiver_prioignore(uint32_t prio)
  */
 void mcreceiver_unregall(void)
 {
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	list_flush(&mcreceivl);
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	resume_uag_state();
-	mcreceivl_lock = mem_deref(mcreceivl_lock);
+	mtx_destroy(&mcreceivl_lock);
 }
 
 
@@ -659,14 +771,14 @@ void mcreceiver_unreg(struct sa *addr){
 	}
 
 	mcreceiver = le->data;
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	list_unlink(&mcreceiver->le);
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 	mem_deref(mcreceiver);
 	resume_uag_state();
 
 	if (list_isempty(&mcreceivl))
-		mcreceivl_lock = mem_deref(mcreceivl_lock);
+		mtx_destroy(&mcreceivl_lock);
 }
 
 
@@ -685,7 +797,6 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 	struct mcreceiver *mcreceiver = NULL;
 	struct config_avt *cfg = &conf_config()->avt;
 	struct range jbuf_del;
-	uint32_t jbuf_wish;
 	enum jbuf_type jbtype;
 	struct pl pl;
 
@@ -708,10 +819,12 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 	if (!mcreceiver)
 		return ENOMEM;
 
-	if (!mcreceivl_lock) {
-		err = lock_alloc(&mcreceivl_lock);
-		if (err)
+	if (list_isempty(&mcreceivl)) {
+		err = mtx_init(&mcreceivl_lock, mtx_plain) != thrd_success;
+		if (err) {
+			err = ENOMEM;
 			goto out;
+		}
 	}
 
 	sa_cpy(&mcreceiver->addr, addr);
@@ -719,19 +832,17 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 	mcreceiver->prio = prio;
 
 	mcreceiver->enable = true;
+	mcreceiver->muted = false;
 	mcreceiver->state = LISTENING;
 
 	jbuf_del  = cfg->jbuf_del;
-	jbuf_wish = cfg->jbuf_wish;
 	jbtype = cfg->jbtype;
 	(void)conf_get_range(conf_cur(), "multicast_jbuf_delay", &jbuf_del);
 	if (0 == conf_get(conf_cur(), "multicast_jbuf_type", &pl))
 		jbtype = conf_get_jbuf_type(&pl);
-	(void)conf_get_u32(conf_cur(), "multicast_jbuf_wish", &jbuf_wish);
 
 	err = jbuf_alloc(&mcreceiver->jbuf, jbuf_del.min, jbuf_del.max);
 	err |= jbuf_set_type(mcreceiver->jbuf, jbtype);
-	err |= jbuf_set_wish(mcreceiver->jbuf, jbuf_wish);
 	if (err)
 		goto out;
 
@@ -754,9 +865,9 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 		}
 	}
 
-	lock_write_get(mcreceivl_lock);
+	mtx_lock(&mcreceivl_lock);
 	list_append(&mcreceivl, &mcreceiver->le, mcreceiver);
-	lock_rel(mcreceivl_lock);
+	mtx_unlock(&mcreceivl_lock);
 
   out:
 	if (err)
@@ -779,8 +890,9 @@ void mcreceiver_print(struct re_printf *pf)
 	re_hprintf(pf, "Multicast Receiver List:\n");
 	LIST_FOREACH(&mcreceivl, le) {
 		mcreceiver = le->data;
-		re_hprintf(pf, "   addr=%J prio=%d enabled=%d state=%s\n",
-			&mcreceiver->addr, mcreceiver->prio,
-			mcreceiver->enable, state_str(mcreceiver->state));
+		re_hprintf(pf, "   addr=%J prio=%d enabled=%d muted=%d "
+			"state=%s\n", &mcreceiver->addr, mcreceiver->prio,
+			mcreceiver->enable, mcreceiver->muted,
+			state_str(mcreceiver->state));
 	}
 }

@@ -6,6 +6,7 @@
 #include <string.h>
 #include <time.h>
 #include <re.h>
+#include <re_atomic.h>
 #include <baresip.h>
 #include "core.h"
 
@@ -24,21 +25,23 @@ enum {
 
 /* Transmit */
 struct sender {
-	struct metric metric;  /**< Metrics for transmit            */
+	struct metric *metric; /**< Metrics for transmit            */
 	struct sa raddr_rtp;   /**< Remote RTP address              */
 	struct sa raddr_rtcp;  /**< Remote RTCP address             */
 	int pt_enc;            /**< Payload type for encoding       */
+	RE_ATOMIC bool enabled;/**< True if enabled                 */
+	mtx_t *lock;
 };
 
 
 /* Receive */
 struct receiver {
-	struct metric metric; /**< Metrics for receiving            */
+	struct metric *metric; /**< Metrics for receiving            */
 	struct tmr tmr_rtp;   /**< Timer for detecting RTP timeout  */
 	struct jbuf *jbuf;    /**< Jitter Buffer for incoming RTP   */
 	uint64_t ts_last;     /**< Timestamp of last recv RTP pkt   */
 	uint32_t rtp_timeout; /**< RTP Timeout value in [ms]        */
-	uint32_t ssrc_rx;     /**< Incoming syncronizing source     */
+	uint32_t ssrc;        /**< Incoming synchronization source  */
 	uint32_t pseq;        /**< Sequence number for incoming RTP */
 	bool ssrc_set;        /**< Incoming SSRC is set             */
 	bool pseq_set;        /**< True if sequence number is set   */
@@ -65,12 +68,16 @@ struct stream {
 	struct menc_media *mes;  /**< Media Encryption media state          */
 	enum media_type type;    /**< Media type, e.g. audio/video          */
 	char *cname;             /**< RTCP Canonical end-point identifier   */
+	char *peer;              /**< Peer URI/name or identifier           */
 	char *mid;               /**< Media stream identification           */
 	bool rtcp_mux;           /**< RTP/RTCP multiplex supported by peer  */
 	bool terminated;         /**< Stream is terminated flag             */
-	bool hold;               /**< Stream is on-hold (local)             */
+	RE_ATOMIC bool hold;     /**< Stream is on-hold (local)             */
 	bool mnat_connected;     /**< Media NAT is connected                */
 	bool menc_secure;        /**< Media stream is secure                */
+	struct tmr tmr_natph;    /**< Timer for NAT pinhole                 */
+	uint32_t natphc;         /**< NAT pinhole RTP counter               */
+	bool pinhole;            /**< NAT pinhole flag                      */
 	stream_pt_h *pth;        /**< Stream payload type handler           */
 	stream_rtp_h *rtph;      /**< Stream RTP handler                    */
 	stream_rtcp_h *rtcph;    /**< Stream RTCP handler                   */
@@ -90,9 +97,14 @@ struct stream {
 };
 
 
+static int stream_decode(struct stream *s);
+
+
 static void print_rtp_stats(const struct stream *s)
 {
-	bool started = s->tx.metric.n_packets>0 || s->rx.metric.n_packets>0;
+	uint32_t tx_n_packets = metric_n_packets(s->tx.metric);
+	uint32_t rx_n_packets = metric_n_packets(s->rx.metric);
+	bool started = tx_n_packets > 0 || rx_n_packets > 0;
 
 	if (!started)
 		return;
@@ -103,10 +115,11 @@ static void print_rtp_stats(const struct stream *s)
 	     "errors:         %7d      %7d\n"
 	     ,
 	     sdp_media_name(s->sdp),
-	     s->tx.metric.n_packets, s->rx.metric.n_packets,
-	     1.0*metric_avg_bitrate(&s->tx.metric)/1000.0,
-	     1.0*metric_avg_bitrate(&s->rx.metric)/1000.0,
-	     s->tx.metric.n_err, s->rx.metric.n_err
+	     tx_n_packets, rx_n_packets,
+	     1.0*metric_avg_bitrate(s->tx.metric)/1000.0,
+	     1.0*metric_avg_bitrate(s->rx.metric)/1000.0,
+	     metric_n_err(s->tx.metric),
+	     metric_n_err(s->rx.metric)
 	     );
 
 	if (s->rtcp_stats.tx.sent || s->rtcp_stats.rx.sent) {
@@ -129,10 +142,11 @@ static void stream_destructor(void *arg)
 	if (s->cfg.rtp_stats)
 		print_rtp_stats(s);
 
-	metric_reset(&s->tx.metric);
-	metric_reset(&s->rx.metric);
+	mem_deref(s->tx.metric);
+	mem_deref(s->rx.metric);
 
 	tmr_cancel(&s->rx.tmr_rtp);
+	tmr_cancel(&s->tmr_natph);
 	list_unlink(&s->le);
 	mem_deref(s->sdp);
 	mem_deref(s->mes);
@@ -142,7 +156,9 @@ static void stream_destructor(void *arg)
 	mem_deref(s->bundle);  /* NOTE: deref before rtp */
 	mem_deref(s->rtp);
 	mem_deref(s->cname);
+	mem_deref(s->peer);
 	mem_deref(s->mid);
+	mem_deref(s->tx.lock);
 }
 
 
@@ -162,22 +178,24 @@ static void send_set_raddr(struct stream *strm, const struct sa *raddr)
 	debug("stream: set remote addr for '%s': %J\n",
 	     media_name(strm->type), raddr);
 
+	mtx_lock(strm->tx.lock);
 	strm->tx.raddr_rtp  = *raddr;
 	strm->tx.raddr_rtcp = *raddr;
+	mtx_unlock(strm->tx.lock);
 }
 
 
 static void recv_set_ssrc(struct receiver *rx, uint32_t ssrc)
 {
 	if (rx->ssrc_set) {
-		if (ssrc != rx->ssrc_rx)
+		if (ssrc != rx->ssrc)
 			info("stream: receive: SSRC changed: %x -> %x\n",
-			     rx->ssrc_rx, ssrc);
-		rx->ssrc_rx = ssrc;
+			     rx->ssrc, ssrc);
+		rx->ssrc = ssrc;
 	}
 	else {
 		info("stream: receive: setting SSRC: %x\n", ssrc);
-		rx->ssrc_rx = ssrc;
+		rx->ssrc = ssrc;
 		rx->ssrc_set = true;
 	}
 }
@@ -192,11 +210,48 @@ static bool mnat_ready(const struct stream *strm)
 }
 
 
+/**
+ * Enable TX stream
+ *
+ * @param strm   Stream object
+ * @param enable True to enable, false to disable
+ *
+ * @return 0 if success and otherwise errorcode
+ */
+int stream_enable_tx(struct stream *strm, bool enable)
+{
+	if (!strm)
+		return EINVAL;
+
+	if (!enable) {
+		re_atomic_rls_set(&strm->tx.enabled, false);
+		return 0;
+	}
+
+	if (!stream_is_ready(strm))
+		return EAGAIN;
+
+	if (!(sdp_media_rdir(strm->sdp) & SDP_SENDONLY))
+		return ENOTSUP;
+
+	if (sdp_media_ldir(strm->sdp) == SDP_RECVONLY)
+		return ENOTSUP;
+
+	if (sdp_media_ldir(strm->sdp) == SDP_INACTIVE)
+		return ENOTSUP;
+
+	re_atomic_rls_set(&strm->tx.enabled, true);
+
+	return 0;
+}
+
+
 static void stream_close(struct stream *strm, int err)
 {
 	stream_error_h *errorh = strm->errorh;
 
 	strm->terminated = true;
+	stream_enable_tx(strm, false);
 	strm->errorh = NULL;
 	jbuf_flush(strm->rx.jbuf);
 
@@ -276,11 +331,11 @@ static inline int lostcalc(struct receiver *rx, uint16_t seq)
 
 
 static int handle_rtp(struct stream *s, const struct rtp_header *hdr,
-		       struct mbuf *mb, unsigned lostc)
+		       struct mbuf *mb, unsigned lostc, bool drop)
 {
 	struct rtpext extv[8];
 	size_t extc = 0;
-	bool ignore = false;
+	bool ignore = drop;
 
 	/* RFC 5285 -- A General Mechanism for RTP Header Extensions */
 	if (hdr->ext && hdr->x.len && mb) {
@@ -309,7 +364,7 @@ static int handle_rtp(struct stream *s, const struct rtp_header *hdr,
 		mb->pos = mb->pos - ext_len;
 		mb->end = ext_stop;
 
-		for (i=0; i<ARRAY_SIZE(extv) && mbuf_get_left(mb); i++) {
+		for (i=0; i<RE_ARRAY_SIZE(extv) && mbuf_get_left(mb); i++) {
 
 			err = rtpext_decode(&extv[i], mb);
 			if (err) {
@@ -326,6 +381,7 @@ static int handle_rtp(struct stream *s, const struct rtp_header *hdr,
 	}
 
  handler:
+	tmr_cancel(&s->tmr_natph);
 	s->rtph(hdr, extv, extc, mb, lostc, &ignore, s->arg);
 	if (ignore)
 		return EAGAIN;
@@ -355,13 +411,10 @@ static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
 
 	s->rx.ts_last = tmr_jiffies();
 
-	if (!mbuf_get_left(mb))
-		return;
-
 	if (!(sdp_media_ldir(s->sdp) & SDP_RECVONLY))
 		return;
 
-	metric_add_packet(&s->rx.metric, mbuf_get_left(mb));
+	metric_add_packet(s->rx.metric, mbuf_get_left(mb));
 
 	if (!s->rx.rtp_estab) {
 		info("stream: incoming rtp for '%s' established"
@@ -374,20 +427,20 @@ static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
 	}
 
 	if (!s->rx.pseq_set) {
-		s->rx.ssrc_rx = hdr->ssrc;
+		s->rx.ssrc = hdr->ssrc;
 		s->rx.ssrc_set = true;
 		s->rx.pseq = hdr->seq - 1;
 		s->rx.pseq_set = true;
 		first = true;
 	}
-	else if (hdr->ssrc != s->rx.ssrc_rx) {
+	else if (hdr->ssrc != s->rx.ssrc) {
 
 		info("stream: %s: SSRC changed 0x%x -> 0x%x"
 		     " (%u bytes from %J)\n",
-		     sdp_media_name(s->sdp), s->rx.ssrc_rx, hdr->ssrc,
+		     sdp_media_name(s->sdp), s->rx.ssrc, hdr->ssrc,
 		     mbuf_get_left(mb), src);
 
-		s->rx.ssrc_rx = hdr->ssrc;
+		s->rx.ssrc = hdr->ssrc;
 		s->rx.pseq = hdr->seq - 1;
 		flush = true;
 	}
@@ -412,33 +465,28 @@ static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
 			     " [seq=%u, ts=%u] (%m)\n",
 			     sdp_media_name(s->sdp), mb->end,
 			     src, hdr->seq, hdr->ts, err);
-			s->rx.metric.n_err++;
+			metric_inc_err(s->rx.metric);
 		}
 
-		if (s->type == MEDIA_VIDEO ||
-			s->cfg.jbtype == JBUF_FIXED) {
 
-			if (stream_decode(s) == EAGAIN)
-				(void) stream_decode(s);
-		}
+		if (stream_decode(s) == EAGAIN)
+			(void) stream_decode(s);
 	}
 	else {
-		(void)handle_rtp(s, hdr, mb, 0);
+		(void)handle_rtp(s, hdr, mb, 0, false);
 	}
 }
 
 
 /**
- * Decodes one RTP packet. For audio streams this function is called by the
- * auplay write handler and runs in the auplay thread. For video streams there
- * is only the RTP thread which also does the decoding.
+ * Decodes one RTP packet
  *
  * @param s The stream
  *
  * @return 0 if success, EAGAIN if it should be called again in order to avoid
  * a jitter buffer overflow, otherwise errorcode
  */
-int stream_decode(struct stream *s)
+static int stream_decode(struct stream *s)
 {
 	struct rtp_header hdr;
 	void *mb;
@@ -458,22 +506,13 @@ int stream_decode(struct stream *s)
 
 	lostc = lostcalc(&s->rx, hdr.seq);
 
-	err2 = handle_rtp(s, &hdr, mb, lostc > 0 ? lostc : 0);
+	err2 = handle_rtp(s, &hdr, mb, lostc > 0 ? lostc : 0, err == EAGAIN);
 	mem_deref(mb);
 
 	if (err2 == EAGAIN)
 		return err2;
 
 	return err;
-}
-
-
-void stream_silence_on(struct stream *s, bool on)
-{
-	if (!s)
-		return;
-
-	jbuf_silence(s->rx.jbuf, on);
 }
 
 
@@ -572,7 +611,6 @@ int stream_start_mediaenc(struct stream *strm)
 }
 
 
-/* todo: move to user of stream.c ? */
 static void update_all_remote_addr(struct list *streaml,
 				   const struct sa *raddr)
 {
@@ -605,16 +643,17 @@ static void mnat_connected_handler(const struct sa *raddr1,
 		return;
 	}
 
+	mtx_lock(strm->tx.lock);
 	strm->tx.raddr_rtp = *raddr1;
 
 	if (strm->rtcp_mux)
 		strm->tx.raddr_rtcp = *raddr1;
 	else if (raddr2)
 		strm->tx.raddr_rtcp = *raddr2;
+	mtx_unlock(strm->tx.lock);
 
 	strm->mnat_connected = true;
 
-	/* todo: move one level up ? */
 	if (bundle_state(stream_bundle(strm)) == BUNDLE_BASE) {
 
 		update_all_remote_addr(strm->le.list, raddr1);
@@ -639,6 +678,8 @@ static void mnat_connected_handler(const struct sa *raddr1,
 			}
 		}
 	}
+
+	stream_enable_tx(strm, true);
 }
 
 
@@ -646,7 +687,11 @@ static int sender_init(struct sender *tx)
 {
 	int err;
 
-	err = metric_init(&tx->metric);
+	tx->metric = metric_alloc();
+	if (!tx->metric)
+		return ENOMEM;
+
+	err = metric_init(tx->metric);
 
 	tx->pt_enc = -1;
 
@@ -658,7 +703,11 @@ static int receiver_init(struct receiver *rx)
 {
 	int err;
 
-	err = metric_init(&rx->metric);
+	rx->metric = metric_alloc();
+	if (!rx->metric)
+		return ENOMEM;
+
+	err = metric_init(rx->metric);
 
 	tmr_init(&rx->tmr_rtp);
 
@@ -685,24 +734,34 @@ int stream_alloc(struct stream **sp, struct list *streaml,
 	if (!sp || !prm || !cfg || !rtph || !pth)
 		return EINVAL;
 
-	s = mem_zalloc(sizeof(*s), stream_destructor);
+	s = mem_zalloc(sizeof(*s), NULL);
 	if (!s)
 		return ENOMEM;
 
 	MAGIC_INIT(s);
+
+	err = mutex_alloc(&s->tx.lock);
+	if (err)
+		goto out;
+
+	mem_destructor(s, stream_destructor);
 
 	err  = sender_init(&s->tx);
 	err |= receiver_init(&s->rx);
 	if (err)
 		goto out;
 
-	s->cfg    = *cfg;
+	s->cfg = *cfg;
+	s->cfg.rtcp_mux = prm->rtcp_mux;
+
 	s->type   = type;
 	s->rtph   = rtph;
 	s->pth    = pth;
 	s->rtcph  = rtcph;
 	s->arg    = arg;
 	s->ldir   = SDP_SENDRECV;
+	s->pinhole = true;
+	tmr_init(&s->tmr_natph);
 
 	if (prm->use_rtp) {
 		err = stream_sock_alloc(s, prm->af);
@@ -718,14 +777,18 @@ int stream_alloc(struct stream **sp, struct list *streaml,
 	if (err)
 		goto out;
 
+	if (prm->peer) {
+		err = str_dup(&s->peer, prm->peer);
+		if (err)
+			goto out;
+	}
+
 	/* Jitter buffer */
-	if (prm->use_rtp && cfg->jbtype != JBUF_OFF &&
-			cfg->jbuf_del.min && cfg->jbuf_del.max) {
+	if (prm->use_rtp && cfg->jbtype != JBUF_OFF && cfg->jbuf_del.max) {
 
 		err  = jbuf_alloc(&s->rx.jbuf, cfg->jbuf_del.min,
 				cfg->jbuf_del.max);
 		err |= jbuf_set_type(s->rx.jbuf, cfg->jbtype);
-		err |= jbuf_set_wish(s->rx.jbuf, cfg->jbuf_wish);
 		if (err)
 			goto out;
 	}
@@ -747,7 +810,7 @@ int stream_alloc(struct stream **sp, struct list *streaml,
 				   rtp_sess_ssrc(s->rtp), prm->cname);
 
 	/* RFC 5761 */
-	if (cfg->rtcp_mux &&
+	if (s->cfg.rtcp_mux &&
 	    (offerer || sdp_media_rattr(s->sdp, "rtcp-mux"))) {
 
 		err |= sdp_media_set_lattr(s->sdp, true, "rtcp-mux", NULL);
@@ -769,7 +832,7 @@ int stream_alloc(struct stream **sp, struct list *streaml,
 		s->mnat = mnat;
 		err = mnat->mediah(&s->mns, mnat_sess,
 				   rtp_sock(s->rtp),
-				   cfg->rtcp_mux ? NULL : rtcp_sock(s->rtp),
+				   s->cfg.rtcp_mux ? NULL : rtcp_sock(s->rtp),
 				   s->sdp, mnat_connected_handler, s);
 		if (err)
 			goto out;
@@ -872,39 +935,48 @@ int stream_send(struct stream *s, bool ext, bool marker, int pt, uint32_t ts,
 	if (!s)
 		return EINVAL;
 
-	if (!sa_isset(&s->tx.raddr_rtp, SA_ALL))
+	if (!re_atomic_acq(&s->tx.enabled))
 		return 0;
 
-	if (!(sdp_media_rdir(s->sdp) & SDP_SENDONLY))
+	if (re_atomic_rlx(&s->hold))
 		return 0;
 
-	if (sdp_media_ldir(s->sdp) == SDP_RECVONLY)
-		return 0;
-
-	if (sdp_media_ldir(s->sdp) == SDP_INACTIVE)
-		return 0;
-
-	if (s->hold)
-		return 0;
-
-	if (!stream_is_ready(s)) {
-		warning("stream: send: not ready\n");
-		return EINTR;
-	}
-
-	metric_add_packet(&s->tx.metric, mbuf_get_left(mb));
+	metric_add_packet(s->tx.metric, mbuf_get_left(mb));
 
 	if (pt < 0)
 		pt = s->tx.pt_enc;
 
 	if (pt >= 0) {
-		err = rtp_send(s->rtp, &s->tx.raddr_rtp, ext,
-			       marker, pt, ts, mb);
+		mtx_lock(s->tx.lock);
+		err = rtp_send(s->rtp, &s->tx.raddr_rtp, ext, marker, pt, ts,
+			       tmr_jiffies_rt_usec(), mb);
+		mtx_unlock(s->tx.lock);
 		if (err)
-			s->tx.metric.n_err++;
+			metric_inc_err(s->tx.metric);
 	}
 
 	return err;
+}
+
+
+/**
+ * Write stream data to the network
+ *
+ * @param s		Stream object
+ * @param seq		Sequence
+ * @param ext		Extension bit
+ * @param marker	Marker bit
+ * @param pt		Payload type
+ * @param ts		Timestamp
+ * @param mb		Payload buffer
+ *
+ * @return int	0 if success, errorcode otherwise
+ */
+int stream_resend(struct stream *s, uint16_t seq, bool ext, bool marker,
+		  int pt, uint32_t ts, struct mbuf *mb)
+{
+	return rtp_resend(s->rtp, seq, &s->tx.raddr_rtp, ext, marker, pt, ts,
+			  mb);
 }
 
 
@@ -981,6 +1053,7 @@ static void stream_remote_set(struct stream *s)
 
 	rtcp_enable_mux(s->rtp, s->rtcp_mux);
 
+	mtx_lock(s->tx.lock);
 	if (bundle_state(stream_bundle(s)) != BUNDLE_MUX) {
 		sa_cpy(&s->tx.raddr_rtp, sdp_media_raddr(s->sdp));
 
@@ -989,14 +1062,14 @@ static void stream_remote_set(struct stream *s)
 		else
 			sdp_media_raddr_rtcp(s->sdp, &s->tx.raddr_rtcp);
 	}
-
+	mtx_unlock(s->tx.lock);
 
 	if (bundle_state(stream_bundle(s)) == BUNDLE_BASE) {
 
 		update_remotes(s->le.list, &s->tx.raddr_rtp);
 	}
 
-
+	mtx_lock(s->tx.lock);
 	if (sa_af(&s->tx.raddr_rtp) == AF_INET6 &&
 			sa_is_linklocal(&s->tx.raddr_rtp))
 		net_set_dst_scopeid(net, &s->tx.raddr_rtp);
@@ -1004,6 +1077,7 @@ static void stream_remote_set(struct stream *s)
 	if (sa_af(&s->tx.raddr_rtcp) == AF_INET6 &&
 			sa_is_linklocal(&s->tx.raddr_rtcp))
 		net_set_dst_scopeid(net, &s->tx.raddr_rtcp);
+	mtx_unlock(s->tx.lock);
 }
 
 
@@ -1023,6 +1097,9 @@ int stream_update(struct stream *s)
 		return EINVAL;
 
 	info("stream: update '%s'\n", media_name(s->type));
+
+	/* disable tx stream for updates */
+	stream_enable_tx(s, false);
 
 	fmt = sdp_media_rformat(s->sdp, NULL);
 
@@ -1053,6 +1130,8 @@ int stream_update(struct stream *s)
 		}
 	}
 
+	stream_enable_tx(s, true);
+
 	return 0;
 }
 
@@ -1074,7 +1153,7 @@ void stream_hold(struct stream *s, bool hold)
 	if (!s)
 		return;
 
-	s->hold = hold;
+	re_atomic_rlx_set(&s->hold, hold);
 	dir = s->ldir;
 
 	if (hold) {
@@ -1116,6 +1195,15 @@ void stream_set_ldir(struct stream *s, enum sdp_dir dir)
 enum sdp_dir stream_ldir(const struct stream *s)
 {
 	return s ? s->ldir : SDP_INACTIVE;
+}
+
+
+void stream_set_rtcp_interval(struct stream *s, uint32_t n)
+{
+	if (!s)
+		return;
+
+	rtcp_set_interval(s->rtp, n);
 }
 
 
@@ -1216,7 +1304,7 @@ const struct rtcp_stats *stream_rtcp_stats(const struct stream *strm)
  */
 uint32_t stream_metric_get_tx_n_packets(const struct stream *strm)
 {
-	return strm ? strm->tx.metric.n_packets : 0;
+	return strm ? metric_n_packets(strm->tx.metric) : 0;
 }
 
 
@@ -1229,7 +1317,7 @@ uint32_t stream_metric_get_tx_n_packets(const struct stream *strm)
  */
 uint32_t stream_metric_get_tx_n_bytes(const struct stream *strm)
 {
-	return strm ? strm->tx.metric.n_bytes : 0;
+	return strm ? metric_n_bytes(strm->tx.metric) : 0;
 }
 
 
@@ -1242,7 +1330,7 @@ uint32_t stream_metric_get_tx_n_bytes(const struct stream *strm)
  */
 uint32_t stream_metric_get_tx_n_err(const struct stream *strm)
 {
-	return strm ? strm->tx.metric.n_err : 0;
+	return strm ? metric_n_err(strm->tx.metric) : 0;
 }
 
 
@@ -1255,7 +1343,7 @@ uint32_t stream_metric_get_tx_n_err(const struct stream *strm)
  */
 uint32_t stream_metric_get_tx_bitrate(const struct stream *strm)
 {
-	return strm ? strm->tx.metric.cur_bitrate : 0;
+	return strm ? metric_bitrate(strm->tx.metric) : 0;
 }
 
 
@@ -1268,7 +1356,7 @@ uint32_t stream_metric_get_tx_bitrate(const struct stream *strm)
  */
 double stream_metric_get_tx_avg_bitrate(const struct stream *strm)
 {
-	return strm ? metric_avg_bitrate(&strm->tx.metric) : 0.0;
+	return strm ? metric_avg_bitrate(strm->tx.metric) : 0.0;
 }
 
 
@@ -1281,7 +1369,7 @@ double stream_metric_get_tx_avg_bitrate(const struct stream *strm)
  */
 uint32_t stream_metric_get_rx_n_packets(const struct stream *strm)
 {
-	return strm ? strm->rx.metric.n_packets : 0;
+	return strm ? metric_n_packets(strm->rx.metric) : 0;
 }
 
 
@@ -1294,7 +1382,7 @@ uint32_t stream_metric_get_rx_n_packets(const struct stream *strm)
  */
 uint32_t stream_metric_get_rx_n_bytes(const struct stream *strm)
 {
-	return strm ? strm->rx.metric.n_bytes : 0;
+	return strm ? metric_n_bytes(strm->rx.metric) : 0;
 }
 
 
@@ -1307,7 +1395,7 @@ uint32_t stream_metric_get_rx_n_bytes(const struct stream *strm)
  */
 uint32_t stream_metric_get_rx_n_err(const struct stream *strm)
 {
-	return strm ? strm->rx.metric.n_err : 0;
+	return strm ? metric_n_err(strm->rx.metric) : 0;
 }
 
 
@@ -1320,7 +1408,7 @@ uint32_t stream_metric_get_rx_n_err(const struct stream *strm)
  */
 uint32_t stream_metric_get_rx_bitrate(const struct stream *strm)
 {
-	return strm ? strm->rx.metric.cur_bitrate : 0;
+	return strm ? metric_bitrate(strm->rx.metric) : 0;
 }
 
 
@@ -1333,7 +1421,7 @@ uint32_t stream_metric_get_rx_bitrate(const struct stream *strm)
  */
 double stream_metric_get_rx_avg_bitrate(const struct stream *strm)
 {
-	return strm ? metric_avg_bitrate(&strm->rx.metric) : 0.0;
+	return strm ? metric_avg_bitrate(strm->rx.metric) : 0.0;
 }
 
 
@@ -1381,6 +1469,46 @@ static void update_menc_muxed(struct list *streaml, bool secure)
 }
 
 
+static uint32_t phwait(struct stream *strm)
+{
+	if (strm->natphc < 6)
+		++strm->natphc;
+
+	return 10 * (1 << strm->natphc);
+}
+
+
+static void natpinhole_handler(void *arg)
+{
+	struct stream *strm = arg;
+	const struct sdp_format *sc = NULL;
+	struct mbuf *mb = NULL;
+	int err = 0;
+
+	sc = sdp_media_rformat(strm->sdp, NULL);
+	if (!sc)
+		return;
+
+	mb = mbuf_alloc(RTP_HEADER_SIZE);
+	if (!mb)
+		return;
+
+	tmr_start(&strm->tmr_natph, phwait(strm), natpinhole_handler, strm);
+	mbuf_set_end(mb, RTP_HEADER_SIZE);
+	mbuf_advance(mb, RTP_HEADER_SIZE);
+
+	/* Send a dummy RTP packet to open NAT pinhole */
+	err = rtp_send(strm->rtp, &strm->tx.raddr_rtp, false, false,
+		       sc->pt, 0, tmr_jiffies_rt_usec(), mb);
+	if (err) {
+		warning("stream: rtp_send to open natpinhole"
+			"failed (%m)\n", err);
+	}
+
+	mem_deref(mb);
+}
+
+
 /**
  * Set the secure flag on the stream object
  *
@@ -1398,6 +1526,8 @@ void stream_set_secure(struct stream *strm, bool secure)
 
 		update_menc_muxed(strm->le.list, secure);
 	}
+
+	stream_enable_tx(strm, true);
 }
 
 
@@ -1447,9 +1577,10 @@ int stream_start_rtcp(const struct stream *strm)
 
 
 /**
- * Enable stream
+ * Enable stream (RX and TX)
  *
  * @param strm   Stream object
+ * @param enable True to enable, false to disable
  *
  * @return 0 if success, otherwise errorcode
  */
@@ -1462,6 +1593,8 @@ int stream_enable(struct stream *strm, bool enable)
 			enable ? "enable":"disable");
 
 	strm->rx.enabled = enable;
+	stream_enable_tx(strm, enable);
+
 	return 0;
 }
 
@@ -1473,41 +1606,15 @@ int stream_enable(struct stream *strm, bool enable)
  *
  * @return int 0 if success, otherwise errorcode
  */
-int stream_open_natpinhole(const struct stream *strm)
+int stream_open_natpinhole(struct stream *strm)
 {
-	const struct sdp_format *sc = NULL;
-	struct mbuf *mb = NULL;
-	int err = 0;
-
 	if (!strm)
 		return EINVAL;
 
-	if (!strm->mnat) {
+	if (!strm->mnat && strm->pinhole)
+		tmr_start(&strm->tmr_natph, 10, natpinhole_handler, strm);
 
-		sc = sdp_media_rformat(strm->sdp, NULL);
-		if (!sc)
-			return EINVAL;
-
-		mb = mbuf_alloc(RTP_HEADER_SIZE);
-		if (!mb)
-			return ENOMEM;
-
-		mbuf_set_end(mb, RTP_HEADER_SIZE);
-		mbuf_advance(mb, RTP_HEADER_SIZE);
-
-		/* Send a dummy RTP packet to open NAT pinhole */
-		err = rtp_send(strm->rtp, &strm->tx.raddr_rtp, false, false,
-			sc->pt, 0, mb);
-		if (err) {
-			warning("stream: rtp_send to open natpinhole"
-				"failed (%m)\n", err);
-			goto out;
-		}
-	}
-
- out:
-	mem_deref(mb);
-	return err;
+	return 0;
 }
 
 
@@ -1524,6 +1631,38 @@ const char *stream_name(const struct stream *strm)
 		return NULL;
 
 	return media_name(strm->type);
+}
+
+
+/**
+ * Get the value of the RTCP Canonical end-point identifier
+ *
+ * @param strm Stream object
+ *
+ * @return Canonical end-point identifier
+ */
+const char *stream_cname(const struct stream *strm)
+{
+	if (!strm)
+		return NULL;
+
+	return strm->cname;
+}
+
+
+/**
+ * Get the peers URI/name or identifier
+ *
+ * @param strm Stream object
+ *
+ * @return Peers URI/name or identifier
+ */
+const char *stream_peer(const struct stream *strm)
+{
+	if (!strm)
+		return NULL;
+
+	return strm->peer;
 }
 
 
@@ -1577,7 +1716,7 @@ int stream_ssrc_rx(const struct stream *strm, uint32_t *ssrc)
 		return EINVAL;
 
 	if (strm->rx.ssrc_set) {
-		*ssrc = strm->rx.ssrc_rx;
+		*ssrc = strm->rx.ssrc;
 		return 0;
 	}
 	else
@@ -1642,6 +1781,9 @@ int stream_debug(struct re_printf *pf, const struct stream *s)
 	err |= re_hprintf(pf, " rx.enabled: %s\n",
 			  s->rx.enabled ? "yes" : "no");
 
+	err |= re_hprintf(pf, " tx.enabled: %s\n",
+			  re_atomic_rlx(&s->tx.enabled) ? "yes" : "no");
+
 	err |= rtp_debug(pf, s->rtp);
 	err |= jbuf_debug(pf, s->rx.jbuf);
 
@@ -1658,8 +1800,8 @@ int stream_print(struct re_printf *pf, const struct stream *s)
 		return 0;
 
 	return re_hprintf(pf, " %s=%u/%u", sdp_media_name(s->sdp),
-			  s->tx.metric.cur_bitrate,
-			  s->rx.metric.cur_bitrate);
+			  metric_bitrate(s->tx.metric),
+			  metric_bitrate(s->rx.metric));
 }
 
 
@@ -1708,4 +1850,13 @@ void stream_enable_bundle(struct stream *strm, enum bundle_state st)
 	}
 
 	bundle_start_socket(strm->bundle, rtp_sock(strm->rtp), strm->le.list);
+}
+
+
+void stream_enable_natpinhole(struct stream *strm, bool enable)
+{
+	if (!strm)
+		return;
+
+	strm->pinhole = enable;
 }

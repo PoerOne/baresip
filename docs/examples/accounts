@@ -7,6 +7,7 @@
 #    ;transport={udp,tcp,tls}
 #
 #  addr-params:
+#    ;100rel={yes,no,required}  # default: no
 #    ;answermode={manual,early,auto,early-audio,early-video}
 #    ;answerdelay=0
 #    ;audio_codecs=opus/48000/2,pcma,...
@@ -22,6 +23,7 @@
 #    ;cert=cert.pem
 #    ;mediaenc={srtp,srtp-mand,srtp-mandf,dtls_srtp,zrtp}
 #    ;medianat={stun,turn,ice}
+#    ;natpinhole={yes, no}  # default: yes
 #    ;mwi=no
 #    ;outbound="sip:primary.example.com;transport=tcp"
 #    ;outbound2=sip:secondary.example.com
@@ -35,16 +37,18 @@
 #    ;sipnat={outbound}
 #    ;stunuser=STUN/TURN/ICE-username
 #    ;stunpass=STUN/TURN/ICE-password
-#    ;stunserver=stun:[user:pass]@host[:port]
+#    ;stunserver=stun:[user:pass]@host[:port]  # see RFC 3986: Use of the format "user:password" in the userinfo field is deprecated.
 #    ;tcpsrcport=6060
-#    ;video_codecs=h264,h263,...
+#    ;uas_user=username
+#    ;uas_pass=password
+#    ;video_codecs=h264,vp8,...
 #
 # Examples:
 #
-#  <sip:user@domain.com>;auth_pass=secret
-#  <sip:user@domain.com;transport=tcp>;auth_pass=secret
-#  <sip:user@1.2.3.4;transport=tcp>;auth_pass=secret
-#  <sip:user@[2001:df8:0:16:216:6fff:fe91:614c]:5070;transport=tcp>;auth_pass=secret
+#  <sip:user@example.com>;auth_pass=secret
+#  <sip:user@example.com;transport=tcp>;auth_pass=secret
+#  <sip:user@192.0.2.4;transport=tcp>;auth_pass=secret
+#  <sip:user@[2001:db8:0:16:216:6fff:fe91:614c]:5070;transport=tcp>;auth_pass=secret
 #
 #
 # A very basic example
@@ -62,6 +66,7 @@
 
 #
 # Use ICE for Media NAT Traversal, using a specific STUN-server
+# See RFC 3986: use of the format "user:password" in the userinfo field is deprecated.
 #
 <sip:user@example.com>;medianat=ice;stunserver="stun:username:password@stunserver.org";auth_pass=pass
 

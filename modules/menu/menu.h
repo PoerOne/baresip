@@ -18,7 +18,7 @@ struct menu{
 	struct mbuf *dialbuf;         /**< Buffer for dialled number      */
 	struct call *xfer_call;       /**< Attended transfer call         */
 	struct call *xfer_targ;       /**< Transfer target call           */
-	char *callid;                 /**< Call-id of active call         */
+	const struct call *curcall;   /**< Call-id of current call        */
 	bool ringback_disabled;       /**< no ringback on sip 180 respons */
 	bool ringback;                /**< Ringback played currently      */
 	struct tmr tmr_redial;        /**< Timer for auto-reconnect       */
@@ -32,6 +32,8 @@ struct menu{
 	int32_t adelay;               /**< Outgoing auto answer delay     */
 	char *ansval;                 /**< Call-Info/Alert-Info value     */
 	struct odict *ovaufile;       /**< Override aufile dictionary     */
+	struct tmr tmr_play;          /**< Tones play timer               */
+	size_t outcnt;                /**< Outgoing call counter          */
 };
 
 /*Get menu object*/

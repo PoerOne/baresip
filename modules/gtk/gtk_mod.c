@@ -9,7 +9,6 @@
 #include <time.h>
 #include <baresip.h>
 #include <stdlib.h>
-#include <pthread.h>
 #include <gtk/gtk.h>
 #include <gio/gio.h>
 #include "gtk_mod.h"
@@ -40,7 +39,7 @@
 
 
 struct gtk_mod {
-	pthread_t thread;
+	thrd_t thread;
 	bool run;
 	bool contacts_inited;
 	struct mqueue *mq;
@@ -131,9 +130,6 @@ static void menu_on_quit(GtkMenuItem *menuItem, gpointer arg)
 	struct gtk_mod *mod = arg;
 	(void)menuItem;
 
-	gtk_widget_destroy(GTK_WIDGET(mod->app_menu));
-	g_object_unref(G_OBJECT(mod->status_icon));
-
 	mqueue_push(mod->mq, MQ_QUIT, 0);
 	info("quit from gtk\n");
 }
@@ -171,7 +167,7 @@ static void menu_on_dial_history(GtkMenuItem *menuItem, gpointer arg)
 	if (!label_1)
 		return;
 
-	label_1[0] = ' ';
+	label_1 = label_1 + 1;
 
 	uri = strtok(label_1, "]");
 	gtk_mod_connect(mod, uri);
@@ -771,30 +767,22 @@ static gboolean status_icon_on_button_press(GtkStatusIcon *status_icon,
 
 int gtk_mod_connect(struct gtk_mod *mod, const char *uri)
 {
-	struct mbuf *uribuf = NULL;
-	char *uri_copy = NULL;
+	char *uric = NULL;
+	struct pl url_pl;
 	int err = 0;
 
+	pl_set_str(&url_pl, uri);
 	if (!mod)
 		return ENOMEM;
 
-	uribuf = mbuf_alloc(64);
-	if (!uribuf)
-		return ENOMEM;
-
-	err = account_uri_complete(ua_account(mod->ua_cur), uribuf, uri);
-	if (err)
-		return EINVAL;
-
-	uribuf->pos = 0;
-	err = mbuf_strdup(uribuf, &uri_copy, uribuf->end);
+	err = account_uri_complete_strdup(ua_account(mod->ua_cur),
+							&uric, &url_pl);
 	if (err)
 		goto out;
 
-	err = mqueue_push(mod->mq, MQ_CONNECT, uri_copy);
+	err = mqueue_push(mod->mq, MQ_CONNECT, uric);
 
 out:
-	mem_deref(uribuf);
 	return err;
 }
 
@@ -803,34 +791,29 @@ int gtk_mod_connect_attended(struct gtk_mod *mod, const char *uri,
 					struct call *attended_call)
 {
 	struct attended_transfer_store *ats;
-	struct mbuf *uribuf = NULL;
-	char *uri_copy = NULL;
+	char *uric = NULL;
+	struct pl url_pl;
 	int err = 0;
 
+	pl_set_str(&url_pl, uri);
 	if (!mod)
 		return ENOMEM;
 
-	uribuf = mbuf_alloc(64);
 	ats = mem_zalloc(sizeof(struct attended_transfer_store), NULL);
-	if (!uribuf)
+	if (!ats)
 		return ENOMEM;
 
-	err = account_uri_complete(ua_account(mod->ua_cur), uribuf, uri);
-	if (err)
-		return EINVAL;
-
-	uribuf->pos = 0;
-	err = mbuf_strdup(uribuf, &uri_copy, uribuf->end);
+	err = account_uri_complete_strdup(ua_account(mod->ua_cur),
+							&uric, &url_pl);
 	if (err)
 		goto out;
 
-	ats->uri = (char *)uri_copy;
+	ats->uri = (char *)uric;
 	ats->attended_call = attended_call;
 
 	err = mqueue_push(mod->mq, MQ_CONNECTATTENDED, ats);
 
 out:
-	mem_deref(uribuf);
 	return err;
 }
 
@@ -966,7 +949,7 @@ static void mqueue_handler(int id, void *data, void *arg)
 }
 
 
-static void *gtk_thread(void *arg)
+static int gtk_thread(void *arg)
 {
 	struct gtk_mod *mod = arg;
 	GtkMenuShell *app_menu;
@@ -974,7 +957,6 @@ static void *gtk_thread(void *arg)
 	GError *err = NULL;
 	struct le *le;
 	GtkIconTheme *theme;
-
 
 	gdk_threads_init();
 	gtk_init(0, NULL);
@@ -1110,7 +1092,7 @@ static void *gtk_thread(void *arg)
 
 	mod->dial_dialog = mem_deref(mod->dial_dialog);
 
-	return NULL;
+	return 0;
 }
 
 
@@ -1284,12 +1266,12 @@ static int module_init(void)
 	}
 #endif
 
-	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 
 	/* start the thread last */
-	err = pthread_create(&mod_obj.thread, NULL, gtk_thread,
+	err = thread_create_name(&mod_obj.thread, "gtk", gtk_thread,
 			     &mod_obj);
 	if (err)
 		return err;
@@ -1307,7 +1289,7 @@ static int module_close(void)
 		gdk_threads_leave();
 	}
 	if (mod_obj.thread)
-		pthread_join(mod_obj.thread, NULL);
+		thrd_join(mod_obj.thread, NULL);
 	mod_obj.mq = mem_deref(mod_obj.mq);
 	aufilt_unregister(&vumeter);
 	message_unlisten(baresip_message(), message_handler);

@@ -7,14 +7,11 @@
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
-#ifdef HAVE_PTHREAD
-#include <pthread.h>
-#endif
 #include "aec.h"
 
 
 /**
- * @defgroup webrtc_aec webrtc_aecm
+ * @defgroup webrtc_aecm webrtc_aecm
  *
  * Acoustic Echo Cancellation (AEC) Mobile Mode using WebRTC SDK.
  *
@@ -35,13 +32,13 @@ static void aec_destructor(void *arg)
 
 	if (st->inst)
 		WebRtcAecm_Free(st->inst);
+
+	mtx_destroy(&st->mutex);
 }
 
 
 int webrtc_aecm_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 {
-	struct conf *conf = conf_cur();
-	bool extended_filter = false;
 	struct aec *aec;
 	int err = 0;
 	int r;
@@ -74,7 +71,11 @@ int webrtc_aecm_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 
 	aec->srate = prm->srate;
 
-	pthread_mutex_init(&aec->mutex, NULL);
+	err = mtx_init(&aec->mutex, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
+		goto out;
+	}
 
 	if (prm->srate > 8000)
 		aec->subframe_len = 160;
@@ -125,12 +126,12 @@ int webrtc_aecm_alloc(struct aec **stp, void **ctx, struct aufilt_prm *prm)
 
 
 static struct aufilt webrtc_aec = {
-	.le      = LE_INIT,
-	.name    = "webrtc_aecm",
-	.encupdh = webrtc_aecm_encode_update,
-	.ench    = webrtc_aecm_encode,
-	.decupdh = webrtc_aecm_decode_update,
-	.dech    = webrtc_aecm_decode
+	LE_INIT,
+	"webrtc_aecm",
+	webrtc_aecm_encode_update,
+	webrtc_aecm_encode,
+	webrtc_aecm_decode_update,
+	webrtc_aecm_decode
 };
 
 

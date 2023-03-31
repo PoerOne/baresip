@@ -273,7 +273,8 @@ static int write_template(const char *file)
 			 "\n"
 			 "# Access rules\n"
 			 "#\"Catch All\" <sip:*@*>;access=block\n"
-			 "\"Good Friend\" <sip:good@friend.com>;access=allow\n"
+			 "\"Good Friend\" <sip:good@example.com>;"
+				"access=allow\n"
 			 "\n"
 			 );
 
@@ -310,7 +311,7 @@ static int module_init(void)
 	if (err)
 		return err;
 
-	err = cmd_register(baresip_commands(), cmdv, ARRAY_SIZE(cmdv));
+	err = cmd_register(baresip_commands(), cmdv, RE_ARRAY_SIZE(cmdv));
 	if (err)
 		return err;
 

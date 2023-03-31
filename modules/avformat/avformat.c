@@ -10,16 +10,13 @@
 #define _BSD_SOURCE 1
 #include <unistd.h>
 #include <string.h>
-#include <pthread.h>
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavdevice/avdevice.h>
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 #include <libavutil/hwcontext.h>
-#endif
 #include "mod_avformat.h"
 
 
@@ -43,9 +40,7 @@
 static struct ausrc *ausrc;
 static struct vidsrc *mod_avf;
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 static enum AVHWDeviceType avformat_hwdevice = AV_HWDEVICE_TYPE_NONE;
-#endif
 static char avformat_inputformat[64];
 static const AVCodec *avformat_decoder;
 static char pass_through[256] = "";
@@ -61,7 +56,7 @@ static void shared_destructor(void *arg)
 
 	if (st->run) {
 		st->run = false;
-		pthread_join(st->thread, NULL);
+		thrd_join(st->thread, NULL);
 	}
 
 	if (st->au.ctx) {
@@ -78,12 +73,12 @@ static void shared_destructor(void *arg)
 		avformat_close_input(&st->ic);
 
 	list_unlink(&st->le);
-	mem_deref(st->lock);
+	mtx_destroy(&st->lock);
 	mem_deref(st->dev);
 }
 
 
-static void *read_thread(void *data)
+static int read_thread(void *data)
 {
 	struct shared *st = data;
 	uint64_t now, offset = tmr_jiffies();
@@ -92,7 +87,7 @@ static void *read_thread(void *data)
 
 	pkt = av_packet_alloc();
 	if (!pkt)
-		return NULL;
+		return ENOMEM;
 
 	while (st->run) {
 
@@ -137,6 +132,7 @@ static void *read_thread(void *data)
 				}
 
 				offset = tmr_jiffies();
+				auts = vidts = 0;
 				break;
 			}
 			else if (ret < 0) {
@@ -179,12 +175,12 @@ static void *read_thread(void *data)
  out:
 	av_packet_free(&pkt);
 
-	return NULL;
+	return 0;
 }
 
 
 static int open_codec(struct stream *s, const struct AVStream *strm, int i,
-		      AVCodecContext *ctx)
+		      AVCodecContext *ctx, bool use_codec)
 {
 	const AVCodec *codec = avformat_decoder;
 	int ret;
@@ -192,7 +188,7 @@ static int open_codec(struct stream *s, const struct AVStream *strm, int i,
 	if (s->idx >= 0 || s->ctx)
 		return 0;
 
-	if (!codec) {
+	if (!codec && use_codec) {
 		codec = avcodec_find_decoder(ctx->codec_id);
 		if (!codec) {
 			info("avformat: can't find codec %i\n", ctx->codec_id);
@@ -200,20 +196,25 @@ static int open_codec(struct stream *s, const struct AVStream *strm, int i,
 		}
 	}
 
-	ret = avcodec_open2(ctx, codec, NULL);
-	if (ret < 0) {
-		warning("avformat: error opening codec (%i)\n", ret);
-		return ENOMEM;
+	if (use_codec) {
+
+		ret = avcodec_open2(ctx, codec, NULL);
+		if (ret < 0) {
+			warning("avformat: error opening codec (%i)\n", ret);
+			return ENOMEM;
+		}
 	}
 
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	if (avformat_hwdevice != AV_HWDEVICE_TYPE_NONE) {
 		AVBufferRef *hwctx;
+
 		ret = av_hwdevice_ctx_create(&hwctx, avformat_hwdevice,
-				NULL, NULL, 0);
+					     NULL, NULL, 0);
 		if (ret < 0) {
-			warning("avformat: error opening hw device vaapi"
-                                       " (%i)\n", ret);
+			warning("avformat: error opening hw device '%s'"
+				" (%i) (%s)\n",
+			        av_hwdevice_get_type_name(avformat_hwdevice),
+				ret, av_err2str(ret));
 			return ENOMEM;
 		}
 
@@ -221,15 +222,20 @@ static int open_codec(struct stream *s, const struct AVStream *strm, int i,
 
 		av_buffer_unref(&hwctx);
 	}
-#endif
 
 	s->time_base = strm->time_base;
 	s->ctx = ctx;
 	s->idx = i;
 
-	debug("avformat: '%s' using decoder '%s' (%s)\n",
-	      av_get_media_type_string(ctx->codec_type),
-	      codec->name, codec->long_name);
+	if (use_codec) {
+		debug("avformat: '%s' using decoder '%s' (%s)\n",
+		      av_get_media_type_string(ctx->codec_type),
+		      codec->name, codec->long_name);
+	}
+	else {
+		debug("avformat: '%s' using pass-through\n",
+		      av_get_media_type_string(ctx->codec_type));
+	}
 
 	return 0;
 }
@@ -271,7 +277,7 @@ int avformat_shared_alloc(struct shared **shp, const char *dev,
 			  pass_through, sizeof(pass_through));
 
 	if (*pass_through != '\0' && 0==strcmp(pass_through, "yes")) {
-		st->is_pass_through = 1;
+		st->is_pass_through = true;
 	}
 
 	if (0 == re_regex(dev, str_len(dev), "[^,]+,[^]+", &pl_fmt, &pl_dev)) {
@@ -299,9 +305,11 @@ int avformat_shared_alloc(struct shared **shp, const char *dev,
 		}
 	}
 
-	err = lock_alloc(&st->lock);
-	if (err)
+	err = mtx_init(&st->lock, mtx_plain) != thrd_success;
+	if (err) {
+		err = ENOMEM;
 		goto out;
+	}
 
 	if (video && size->w) {
 		re_snprintf(buf, sizeof(buf), "%ux%u", size->w, size->h);
@@ -396,13 +404,14 @@ int avformat_shared_alloc(struct shared **shp, const char *dev,
 		switch (ctx->codec_type) {
 
 		case AVMEDIA_TYPE_AUDIO:
-			err = open_codec(&st->au, strm, i, ctx);
+			err = open_codec(&st->au, strm, i, ctx, true);
 			if (err)
 				goto out;
 			break;
 
 		case AVMEDIA_TYPE_VIDEO:
-			err = open_codec(&st->vid, strm, i, ctx);
+			err = open_codec(&st->vid, strm, i, ctx,
+					 !st->is_pass_through);
 			if (err)
 				goto out;
 			break;
@@ -413,7 +422,7 @@ int avformat_shared_alloc(struct shared **shp, const char *dev,
 	}
 
 	st->run = true;
-	err = pthread_create(&st->thread, NULL, read_thread, st);
+	err = thread_create_name(&st->thread, "avformat", read_thread, st);
 	if (err) {
 		st->run = false;
 		goto out;
@@ -443,8 +452,9 @@ struct shared *avformat_shared_lookup(const char *dev)
 	for (le = sharedl.head; le; le = le->next) {
 
 		struct shared *sh = le->data;
+		bool have_av = sh->au.ctx != NULL && sh->vid.ctx != NULL;
 
-		if (0 == str_casecmp(sh->dev, dev))
+		if (have_av && 0 == str_casecmp(sh->dev, dev))
 			return sh;
 	}
 
@@ -457,9 +467,9 @@ void avformat_shared_set_audio(struct shared *sh, struct ausrc_st *st)
 	if (!sh)
 		return;
 
-	lock_write_get(sh->lock);
+	mtx_lock(&sh->lock);
 	sh->ausrc_st = st;
-	lock_rel(sh->lock);
+	mtx_unlock(&sh->lock);
 }
 
 
@@ -468,25 +478,18 @@ void avformat_shared_set_video(struct shared *sh, struct vidsrc_st *st)
 	if (!sh)
 		return;
 
-	lock_write_get(sh->lock);
+	mtx_lock(&sh->lock);
 	sh->vidsrc_st = st;
-	lock_rel(sh->lock);
+	mtx_unlock(&sh->lock);
 }
 
 
 static int module_init(void)
 {
 	int err;
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	char hwaccel[64] = "";
-#endif
 	char decoder[64] = "";
 
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(58, 9, 100)
-	avcodec_register_all();
-#endif
-
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	conf_get_str(conf_cur(), "avformat_hwaccel", hwaccel, sizeof(hwaccel));
 	if (str_isset(hwaccel)) {
 		avformat_hwdevice = av_hwdevice_find_type_by_name(hwaccel);
@@ -495,7 +498,6 @@ static int module_init(void)
                                         hwaccel);
 		}
 	}
-#endif
 
 	conf_get_str(conf_cur(), "avformat_inputformat", avformat_inputformat,
 			sizeof(avformat_inputformat));

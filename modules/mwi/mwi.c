@@ -151,17 +151,19 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 
 	if (ev == UA_EVENT_REGISTER_OK) {
 
-		if (!mwi_find(ua) &&
-		    (str_casecmp(account_mwi(acc), "yes") == 0))
+		if (!mwi_find(ua) && account_mwi(acc))
 			mwi_subscribe(ua);
 	}
-	else if (ev == UA_EVENT_SHUTDOWN) {
+	else if (ev == UA_EVENT_SHUTDOWN ||
+		 (ev == UA_EVENT_UNREGISTERING &&
+		  str_cmp(account_sipnat(acc), "outbound") == 0)) {
 
 		struct mwi *mwi = mwi_find(ua);
 
 		if (mwi) {
 
 			info("mwi: shutdown of %s\n", account_aor(acc));
+
 			mwi->shutdown = true;
 
 			if (mwi->sub) {

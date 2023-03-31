@@ -47,6 +47,7 @@ static const char *event_class_name(enum ua_event ev)
 	case UA_EVENT_MWI_NOTIFY:
 		return "mwi";
 
+	case UA_EVENT_CREATE:
 	case UA_EVENT_SHUTDOWN:
 	case UA_EVENT_EXIT:
 		return "application";
@@ -63,6 +64,7 @@ static const char *event_class_name(enum ua_event ev)
 	case UA_EVENT_CALL_TRANSFER_FAILED:
 	case UA_EVENT_CALL_DTMF_START:
 	case UA_EVENT_CALL_DTMF_END:
+	case UA_EVENT_CALL_RTPESTAB:
 	case UA_EVENT_CALL_RTCP:
 	case UA_EVENT_CALL_MENC:
 		return "call";
@@ -139,8 +141,6 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 	const char *event_str = uag_event_str(ev);
 	struct sdp_media *amedia;
 	struct sdp_media *vmedia;
-	enum sdp_dir ardir;
-	enum sdp_dir vrdir;
 	int err = 0;
 
 	if (!od)
@@ -164,6 +164,10 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 		const char *dir;
 		const char *call_identifier;
 		const char *peerdisplayname;
+		enum sdp_dir ardir;
+		enum sdp_dir vrdir;
+		enum sdp_dir adir;
+		enum sdp_dir vdir;
 
 		dir = call_is_outgoing(call) ? "outgoing" : "incoming";
 
@@ -183,18 +187,33 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 
 		amedia = stream_sdpmedia(audio_strm(call_audio(call)));
 		ardir = sdp_media_rdir(amedia);
+		adir  = sdp_media_dir(amedia);
 		if (!sa_isset(sdp_media_raddr(amedia), SA_ADDR))
-			ardir = SDP_INACTIVE;
+			ardir = adir = SDP_INACTIVE;
 
 		vmedia = stream_sdpmedia(video_strm(call_video(call)));
 		vrdir = sdp_media_rdir(vmedia);
+		vdir  = sdp_media_dir(vmedia);
 		if (!sa_isset(sdp_media_raddr(vmedia), SA_ADDR))
-			vrdir = SDP_INACTIVE;
+			vrdir = vdir = SDP_INACTIVE;
 
 		err |= odict_entry_add(od, "remoteaudiodir", ODICT_STRING,
 				sdp_dir_name(ardir));
 		err |= odict_entry_add(od, "remotevideodir", ODICT_STRING,
 				sdp_dir_name(vrdir));
+		err |= odict_entry_add(od, "audiodir", ODICT_STRING,
+				sdp_dir_name(adir));
+		err |= odict_entry_add(od, "videodir", ODICT_STRING,
+				sdp_dir_name(vdir));
+		if (call_diverteruri(call))
+			err |= odict_entry_add(od, "diverteruri", ODICT_STRING,
+					       call_diverteruri(call));
+
+		const char *user_data = call_user_data(call);
+		if (user_data) {
+			err |= odict_entry_add(od, "userdata", ODICT_STRING,
+				user_data);
+		}
 
 		if (err)
 			goto out;
@@ -319,6 +338,11 @@ void ua_event(struct ua *ua, enum ua_event ev, struct call *call,
 		struct ua_eh *eh = le->data;
 		le = le->next;
 
+		if (call_is_evstop(call)) {
+			call_set_evstop(call, false);
+			break;
+		}
+
 		eh->h(ua, ev, call, buf, eh->arg);
 	}
 }
@@ -392,6 +416,7 @@ const char *uag_event_str(enum ua_event ev)
 	case UA_EVENT_FALLBACK_FAIL:        return "FALLBACK_FAIL";
 	case UA_EVENT_UNREGISTERING:        return "UNREGISTERING";
 	case UA_EVENT_MWI_NOTIFY:           return "MWI_NOTIFY";
+	case UA_EVENT_CREATE:               return "CREATE";
 	case UA_EVENT_SHUTDOWN:             return "SHUTDOWN";
 	case UA_EVENT_EXIT:                 return "EXIT";
 	case UA_EVENT_CALL_INCOMING:        return "CALL_INCOMING";
@@ -414,6 +439,7 @@ const char *uag_event_str(enum ua_event ev)
 	case UA_EVENT_AUDIO_ERROR:          return "AUDIO_ERROR";
 	case UA_EVENT_CALL_LOCAL_SDP:       return "CALL_LOCAL_SDP";
 	case UA_EVENT_CALL_REMOTE_SDP:      return "CALL_REMOTE_SDP";
+	case UA_EVENT_REFER:                return "REFER";
 	case UA_EVENT_MODULE:               return "MODULE";
 	case UA_EVENT_CUSTOM:               return "CUSTOM";
 	default: return "?";

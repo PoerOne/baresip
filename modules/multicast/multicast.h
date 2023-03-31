@@ -20,6 +20,7 @@ enum {
 
 uint8_t multicast_callprio(void);
 uint8_t multicast_ttl(void);
+uint32_t multicast_fade_time(void);
 
 
 /* Sender */
@@ -41,13 +42,18 @@ int mcreceiver_chprio(struct sa *addr, uint32_t prio);
 void mcreceiver_enprio(uint32_t prio);
 void mcreceiver_enrangeprio(uint32_t priol, uint32_t prioh, bool en);
 int  mcreceiver_prioignore(uint32_t prio);
+int  mcreceiver_mute(uint32_t prio);
 void mcreceiver_enable(bool enable);
 
 void mcreceiver_print(struct re_printf *pf);
 
 /* Player <exchangable player> */
-int mcplayer_start(struct jbuf *jbuf, const struct aucodec *ac);
+int mcplayer_start(const struct aucodec *ac);
 void mcplayer_stop(void);
+void mcplayer_fadeout(void);
+void mcplayer_fadein(bool restart);
+bool mcplayer_fadeout_done(void);
+int mcplayer_decode(const struct rtp_header *hdr, struct mbuf *mb, bool drop);
 
 int  mcplayer_init(void);
 void mcplayer_terminate(void);

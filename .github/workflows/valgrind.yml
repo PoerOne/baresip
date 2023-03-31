@@ -1,38 +1,47 @@
 name: valgrind leak check
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+    branches:
+    - main
 
 jobs:
   valgrind:
     runs-on: ubuntu-latest 
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
+
+    - name: fix flaky azure mirrors
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        sudo sed -i 's/azure\./de\./' /etc/apt/sources.list
     
     - name: install packages
       run: |
         sudo apt-get update && sudo apt-get install -y libssl-dev libc6-dbg
         sudo snap install --classic valgrind
    
-    - uses: sreimers/pr-dependency-action@v0.3
+    - uses: sreimers/pr-dependency-action@v0.5
       with:
         name: re
         repo: https://github.com/baresip/re
         secret: ${{ secrets.GITHUB_TOKEN }}
 
-    - uses: sreimers/pr-dependency-action@v0.3
-      with:
-        name: rem
-        repo: https://github.com/baresip/rem
-        secret: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: make re/rem
+    - name: make re
       run: |
-        for p in re rem; do cd $p && sudo PATH="$PATH" make install && cd - && sudo rm -Rf $p; done
-        sudo ldconfig
+        cmake -S re -B re/build
+        cmake --build re/build -j
+        mv re ../.
     
+    - name: ldconfig
+      run: sudo ldconfig
+
     - name: make baresip selftest
-      run: make EXTRA_CFLAGS="-Werror" CCACHE= test;
+      run: cmake -B build -DSTATIC=1 -DMODULES="g711;ausine;fakevideo;auconv;dtls_srtp;srtp;aufile" && cmake --build build -j
 
     - name: valgrind test
-      run: valgrind --leak-check=full --show-reachable=yes --error-exitcode=42 ./selftest 
+      run: valgrind --leak-check=full --show-reachable=yes --error-exitcode=42 ./build/test/selftest

@@ -10,7 +10,6 @@
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
-#include <pthread.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/pixdesc.h>
@@ -45,6 +44,9 @@ static enum vidfmt avpixfmt_to_vidfmt(enum AVPixelFormat pix_fmt)
 	case AV_PIX_FMT_NV21:     return VID_FMT_NV21;
 	case AV_PIX_FMT_UYVY422:  return VID_FMT_UYVY422;
 	case AV_PIX_FMT_YUYV422:  return VID_FMT_YUYV422;
+	case AV_PIX_FMT_RGBA:     return VID_FMT_RGB32;
+	case AV_PIX_FMT_YUV422P:  return VID_FMT_YUV422P;
+	case AV_PIX_FMT_YUVJ422P: return VID_FMT_YUV422P;
 	default:                  return (enum vidfmt)-1;
 	}
 }
@@ -119,14 +121,15 @@ void avformat_video_copy(struct shared *st, AVPacket *pkt)
 	vp.buf = pkt->data;
 	vp.size = pkt->size;
 	vp.timestamp = pkt->pts * VIDEO_TIMEBASE * tb.num / tb.den;
+	vp.keyframe = !!(pkt->flags & AV_PKT_FLAG_KEY);
 
-	lock_read_get(st->lock);
+	mtx_lock(&st->lock);
 
 	if (st->vidsrc_st && st->vidsrc_st->packeth) {
 		st->vidsrc_st->packeth(&vp, st->vidsrc_st->arg);
 	}
 
-	lock_rel(st->lock);
+	mtx_unlock(&st->lock);
 }
 
 
@@ -138,9 +141,6 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 	uint64_t timestamp;
 	unsigned i;
 	int ret;
-#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(57, 37, 100)
-	int got_pict;
-#endif
 
 	if (!st || !st->vid.ctx)
 		return;
@@ -151,8 +151,6 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 	if (!frame)
 		return;
 
-#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 37, 100)
-
 	ret = avcodec_send_packet(st->vid.ctx, pkt);
 	if (ret < 0)
 		goto out;
@@ -161,21 +159,13 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 	if (ret < 0)
 		goto out;
 
-#else
-	ret = avcodec_decode_video2(st->vid.ctx, frame, &got_pict, pkt);
-	if (ret < 0 || !got_pict)
-		goto out;
-#endif
-
-#if LIBAVUTIL_VERSION_MAJOR >= 56
 	if (st->vid.ctx->hw_device_ctx) {
 		AVFrame *frame2;
+
 		frame2 = av_frame_alloc();
 		if (!frame2)
 			goto out;
 
-		/* Many hw decoders are happy about YUV420P */
-		frame2->format = AV_PIX_FMT_YUV420P;
 		ret = av_hwframe_transfer_data(frame2, frame, 0);
 		if (ret < 0) {
 			av_frame_free(&frame2);
@@ -192,7 +182,6 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 		av_frame_move_ref(frame, frame2);
 		av_frame_free(&frame2);
 	}
-#endif
 
 	vf.fmt = avpixfmt_to_vidfmt(frame->format);
 	if (vf.fmt == (enum vidfmt)-1) {
@@ -214,12 +203,12 @@ void avformat_video_decode(struct shared *st, AVPacket *pkt)
 	/* convert timestamp */
 	timestamp = frame->pts * VIDEO_TIMEBASE * tb.num / tb.den;
 
-	lock_read_get(st->lock);
+	mtx_lock(&st->lock);
 
 	if (st->vidsrc_st && st->vidsrc_st->frameh)
 		st->vidsrc_st->frameh(&vf, timestamp, st->vidsrc_st->arg);
 
-	lock_rel(st->lock);
+	mtx_unlock(&st->lock);
 
  out:
 	if (frame)

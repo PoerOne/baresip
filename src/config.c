@@ -4,7 +4,9 @@
  * Copyright (C) 2010 Alfred E. Heggestad
  */
 #include <string.h>
+#ifndef WIN32
 #include <dirent.h>
+#endif
 #include <re.h>
 #include <rem.h>
 #include <baresip.h>
@@ -61,6 +63,8 @@ static struct config core_config = {
 		AUFMT_S16LE,
 		AUFMT_S16LE,
 		{20, 160},
+		false,
+		-35.0,
 		101
 	},
 
@@ -70,6 +74,8 @@ static struct config core_config = {
 		"", "",
 		640, 480,
 		1000000,
+		0,
+		0,
 		30,
 		true,
 		VID_FMT_YUV420P,
@@ -84,7 +90,6 @@ static struct config core_config = {
 		false,
 		JBUF_FIXED,
 		{5, 10},
-		0,
 		false,
 		0,
 		false
@@ -96,6 +101,8 @@ static struct config core_config = {
 		"",
 		{ {"",0} },
 		0,
+		true,
+		false,
 	},
 };
 
@@ -112,7 +119,7 @@ static int range_print(struct re_printf *pf, const struct range *rng)
 static int dns_handler(const struct pl *pl, void *arg, bool fallback)
 {
 	struct config_net *cfg = arg;
-	const size_t max_count = ARRAY_SIZE(cfg->nsv);
+	const size_t max_count = RE_ARRAY_SIZE(cfg->nsv);
 	int err;
 
 	if (cfg->nsc >= max_count) {
@@ -278,6 +285,17 @@ static int sip_transports_print(struct re_printf *pf, uint32_t *mask)
 }
 
 
+static const char *net_af_str(int af)
+{
+	if (af == AF_INET)
+		return "ipv4";
+	else if (af == AF_INET6)
+		return "ipv6";
+	else
+		return "unspecified";
+}
+
+
 /**
  * Parse the core configuration file and update baresip core config
  *
@@ -396,6 +414,10 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		return EINVAL;
 	}
 
+	if (0 == conf_get(conf, "audio_buffer_mode", &pl))
+		cfg->audio.adaptive = conf_aubuf_adaptive(&pl);
+
+	(void)conf_get_float(conf, "audio_silence", &cfg->audio.silence);
 	(void)conf_get_u32(conf, "audio_telev_pt", &cfg->audio.telev_pt);
 
 	/* Video */
@@ -410,6 +432,8 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		cfg->video.height = size.h;
 	}
 	(void)conf_get_u32(conf, "video_bitrate", &cfg->video.bitrate);
+	(void)conf_get_u32(conf, "video_sendrate", &cfg->video.send_bitrate);
+	(void)conf_get_u32(conf, "video_burst_bits", &cfg->video.burst_bits);
 	(void)conf_get_float(conf, "video_fps", &cfg->video.fps);
 	(void)conf_get_bool(conf, "video_fullscreen", &cfg->video.fullscreen);
 
@@ -427,14 +451,11 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		cfg->avt.rtp_bw.max *= 1000;
 	}
 
-	(void)conf_get_bool(conf, "rtcp_mux", &cfg->avt.rtcp_mux);
 	if (0 == conf_get(conf, "jitter_buffer_type", &jbtype))
 		cfg->avt.jbtype = conf_get_jbuf_type(&jbtype);
 
 	(void)conf_get_range(conf, "jitter_buffer_delay",
 			     &cfg->avt.jbuf_del);
-	(void)conf_get_u32(conf, "jitter_buffer_wish",
-			     &cfg->avt.jbuf_wish);
 	(void)conf_get_bool(conf, "rtp_stats", &cfg->avt.rtp_stats);
 	(void)conf_get_u32(conf, "rtp_timeout", &cfg->avt.rtp_timeout);
 
@@ -448,8 +469,19 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 	(void)conf_apply(conf, "dns_server", dns_server_handler, &cfg->net);
 	(void)conf_apply(conf, "dns_fallback",
 			   dns_fallback_handler, &cfg->net);
+	(void)conf_get_bool(conf, "dns_getaddrinfo",
+			    &cfg->net.use_getaddrinfo);
 	(void)conf_get_str(conf, "net_interface",
 			   cfg->net.ifname, sizeof(cfg->net.ifname));
+	if (0 == conf_get(conf, "net_af", &pl)) {
+		if (0 == pl_strcasecmp(&pl, "ipv4"))
+			cfg->net.af = AF_INET;
+		else if (0 == pl_strcasecmp(&pl, "ipv6"))
+			cfg->net.af = AF_INET6;
+		else {
+			warning("unsupported af (%r)\n", &pl);
+		}
+	}
 
 	return err;
 }
@@ -503,6 +535,8 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "auenc_format\t\t%s\n"
 			 "audec_format\t\t%s\n"
 			 "audio_buffer\t\t%H\t\t# ms\n"
+			 "audio_buffer_mode\t%s\t\t# fixed, adaptive\n"
+			 "audio_silence\t\t%.1lf\t\t# in [dB]\n"
 			 "audio_telev_pt\t\t%u\n"
 			 "\n"
 			 "# Video\n"
@@ -520,15 +554,14 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "rtp_video_tos\t\t%u\n"
 			 "rtp_ports\t\t%H\n"
 			 "rtp_bandwidth\t\t%H\n"
-			 "rtcp_mux\t\t%s\n"
 			 "jitter_buffer_type\t%s\n"
 			 "jitter_buffer_delay\t%H\n"
-			 "jitter_buffer_wish\t%u\n"
 			 "rtp_stats\t\t%s\n"
 			 "rtp_timeout\t\t%u # in seconds\n"
 			 "\n"
 			 "# Network\n"
 			 "net_interface\t\t%s\n"
+			 "net_af\t\t\t%s\n"
 			 "\n"
 			 ,
 
@@ -557,6 +590,8 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 aufmt_name(cfg->audio.enc_fmt),
 			 aufmt_name(cfg->audio.dec_fmt),
 			 range_print, &cfg->audio.buffer,
+			 cfg->audio.adaptive ? "adaptive" : "fixed",
+			 cfg->audio.silence,
 			 cfg->audio.telev_pt,
 
 			 cfg->video.src_mod, cfg->video.src_dev,
@@ -570,14 +605,13 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->avt.rtpv_tos,
 			 range_print, &cfg->avt.rtp_ports,
 			 range_print, &cfg->avt.rtp_bw,
-			 cfg->avt.rtcp_mux ? "yes" : "no",
 			 jbuf_type_str(cfg->avt.jbtype),
 			 range_print, &cfg->avt.jbuf_del,
-			 cfg->avt.jbuf_wish,
 			 cfg->avt.rtp_stats ? "yes" : "no",
 			 cfg->avt.rtp_timeout,
 
-			 cfg->net.ifname
+			 cfg->net.ifname,
+			 net_af_str(cfg->net.af)
 		   );
 
 	return err;
@@ -611,8 +645,6 @@ static const char *default_audio_device(void)
 	#endif
 #elif defined (FREEBSD)
 	return "alsa,default";
-#elif defined (OPENBSD)
-	return "sndio,default";
 #elif defined (WIN32)
 	return "winwave,nil";
 #else
@@ -651,6 +683,8 @@ static const char *default_avcodec_hwaccel(void)
 	return "vaapi";
 #elif defined (DARWIN)
 	return "videotoolbox";
+#elif defined (WIN32)
+	return "nvenc";
 #else
 	return "none";
 #endif
@@ -727,6 +761,8 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "auenc_format\t\ts16\t\t# s16, float, ..\n"
 			  "audec_format\t\ts16\t\t# s16, float, ..\n"
 			  "audio_buffer\t\t%H\t\t# ms\n"
+			  "audio_buffer_mode\t%s\t\t# fixed, adaptive\n"
+			  "audio_silence\t\t%.1lf\t\t# in [dB]\n"
 			  "audio_telev_pt\t\t%u\t\t"
 			  "# payload type for telephone-event\n"
 			  ,
@@ -738,6 +774,8 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  default_audio_device(),
 			  default_audio_device(),
 			  range_print, &cfg->audio.buffer,
+			  cfg->audio.adaptive ? "adaptive" : "fixed",
+			  cfg->audio.silence,
 			  cfg->audio.telev_pt);
 
 	err |= re_hprintf(pf,
@@ -762,17 +800,16 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "rtp_video_tos\t\t136\n"
 			  "#rtp_ports\t\t10000-20000\n"
 			  "#rtp_bandwidth\t\t512-1024 # [kbit/s]\n"
-			  "rtcp_mux\t\tno\n"
 			  "jitter_buffer_type\tfixed\t\t# off, fixed,"
 				" adaptive\n"
 			  "jitter_buffer_delay\t%u-%u\t\t# frames\n"
-			  "#jitter_buffer_wish\t%u\t\t# frames for start\n"
 			  "rtp_stats\t\tno\n"
 			  "#rtp_timeout\t\t60\n"
 			  "\n# Network\n"
 			  "#dns_server\t\t1.1.1.1:53\n"
 			  "#dns_server\t\t1.0.0.1:53\n"
 			  "#dns_fallback\t\t8.8.8.8:53\n"
+			  "#dns_getaddrinfo\t\tno\n"
 			  "#net_interface\t\t%H\n"
 			  "\n"
 			  "# Play tones\n"
@@ -780,7 +817,6 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "#file_srate\t\t16000\n"
 			  "#file_channels\t\t1\n",
 			  cfg->avt.jbuf_del.min, cfg->avt.jbuf_del.max,
-			  cfg->avt.jbuf_del.min + 1,
 			  default_interface_print, NULL);
 
 	return err;
@@ -789,6 +825,10 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 
 static uint32_t count_modules(const char *path)
 {
+#ifdef WIN32
+	(void)path;
+	return 0;
+#else
 	DIR *dirp;
 	struct dirent *dp;
 	uint32_t n = 0;
@@ -812,6 +852,7 @@ static uint32_t count_modules(const char *path)
 	(void)closedir(dirp);
 
 	return n;
+#endif
 }
 
 
@@ -831,7 +872,7 @@ static const char *detect_module_path(bool *valid)
 	uint32_t nmax = 0;
 	size_t i;
 
-	for (i=0; i<ARRAY_SIZE(pathv); i++) {
+	for (i=0; i<RE_ARRAY_SIZE(pathv); i++) {
 
 		uint32_t n = count_modules(pathv[i]);
 
@@ -888,10 +929,10 @@ int config_write_template(const char *file, const struct config *cfg)
 
 	info("config: creating config template %s\n", file);
 
-	f = fopen(file, "w");
-	if (!f) {
-		warning("config: writing %s: %m\n", file, errno);
-		return errno;
+	err = fs_fopen(&f, file, "w");
+	if (err) {
+		warning("config: writing %s: %m\n", file, err);
+		return err;
 	}
 
 	(void)re_fprintf(f,
@@ -931,7 +972,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "#module\t\t\t" "g722" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "g726" MOD_EXT "\n");
 	(void)re_fprintf(f, "module\t\t\t" "g711" MOD_EXT "\n");
-	(void)re_fprintf(f, "#module\t\t\t" "gsm" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "l16" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "mpa" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "codec2" MOD_EXT "\n");
@@ -958,8 +998,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	#endif
 #elif defined (FREEBSD)
 	(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
-#elif defined (OPENBSD)
-	(void)re_fprintf(f, "module\t\t\t" "sndio" MOD_EXT "\n");
 #elif defined (WIN32)
 	(void)re_fprintf(f, "module\t\t\t" "winwave" MOD_EXT "\n");
 #else
@@ -969,7 +1007,7 @@ int config_write_template(const char *file, const struct config *cfg)
 	}
 	else {
 		(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
-		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT "\n");
+		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT"\n");
 	}
 #endif
 	(void)re_fprintf(f, "#module\t\t\t" "jack" MOD_EXT "\n");
@@ -1015,7 +1053,6 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "\n# Audio/Video source modules\n");
 	(void)re_fprintf(f, "#module\t\t\t" "avformat" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "gst" MOD_EXT "\n");
-	(void)re_fprintf(f, "#module\t\t\t" "gst_video" MOD_EXT "\n");
 
 	(void)re_fprintf(f, "\n# Compatibility modules\n");
 	(void)re_fprintf(f, "#module\t\t\t" "ebuacip" MOD_EXT "\n");
@@ -1031,7 +1068,7 @@ int config_write_template(const char *file, const struct config *cfg)
 	(void)re_fprintf(f, "\n# Media encryption modules\n");
 	(void)re_fprintf(f, "#module\t\t\t" "srtp" MOD_EXT "\n");
 	(void)re_fprintf(f, "#module\t\t\t" "dtls_srtp" MOD_EXT "\n");
-	(void)re_fprintf(f, "#module\t\t\t" "zrtp" MOD_EXT "\n");
+	(void)re_fprintf(f, "#module\t\t\t" "gzrtp" MOD_EXT "\n");
 	(void)re_fprintf(f, "\n");
 
 	(void)re_fprintf(f, "\n#------------------------------------"
@@ -1134,6 +1171,7 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#busy_aufile\t\tbusy.wav\n"
 			"#error_aufile\t\terror.wav\n"
 			"#sip_autoanswer_aufile\tautoanswer.wav\n"
+			"#menu_max_earlyaudio\t32\n"
 			);
 
 	(void)re_fprintf(f,
@@ -1146,8 +1184,11 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#avcodec_h264dec\th264\n"
 			"#avcodec_h265enc\tlibx265\n"
 			"#avcodec_h265dec\thevc\n"
-			"#avcodec_hwaccel\t%s\n",
-			default_avcodec_hwaccel());
+			"#avcodec_hwaccel\t%s\n"
+			"#avcodec_profile_level_id 42002a\n"
+			"#avcodec_keyint\t\t10\n",
+			default_avcodec_hwaccel()
+			);
 
 	(void)re_fprintf(f,
 			"\n# ctrl_dbus\n"
@@ -1191,17 +1232,20 @@ int config_write_template(const char *file, const struct config *cfg)
 			 "#multicast_jbuf_type\tfixed\t\t"
 				"# off, fixed, adaptive\n"
 			 "#multicast_jbuf_delay\t5-10\t\t# frames\n"
-			 "#multicast_jbuf_wish\t6\t\t# frames for start\n"
 			 "#multicast_listener\t224.0.2.21:50000\n"
 			 "#multicast_listener\t224.0.2.21:50002\n");
 
 	(void)re_fprintf(f,
 			 "\n# avformat\n"
-			 "#avformat_hwaccel\tvaapi\n"
+			 "#avformat_hwaccel\t%s\n"
 			 "#avformat_inputformat\tmjpeg\n"
 			 "#avformat_decoder\tmjpeg\n"
 			 "#avformat_pass_through\tyes\n"
-			 "#avformat_rtsp_transport\tudp\n");
+			 "#avformat_rtsp_transport\tudp\n",
+			 default_avcodec_hwaccel());
+
+	(void)re_fprintf(f, "\n# ice\n"
+			    "#ice_policy\t\tall\t# all, relay (candidates)\n");
 
 	if (f)
 		(void)fclose(f);

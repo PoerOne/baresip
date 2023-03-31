@@ -130,6 +130,9 @@ static int common_update(struct auresamp_st **stp, struct aufilt_prm *oprm,
 	if (!stp || !oprm)
 		return EINVAL;
 
+	if (!oprm->ch || !oprm->srate)
+		return EINVAL;
+
 	if (*stp)
 		return 0;
 
@@ -152,10 +155,13 @@ static int common_resample(struct auresamp_st *st, struct auframe *af)
 	int err = 0;
 
 	if (st->dbg) {
-		debug("auresam: resample %s %u/%u --> %u/%u\n", st->dbg,
+		debug("auresamp: resample %s %u/%u --> %u/%u\n", st->dbg,
 		      af->srate, af->ch, st->oprm.srate, st->oprm.ch);
 		st->dbg = NULL;
 	}
+
+	if (!af->ch || !af->srate)
+		return EINVAL;
 
 	if (st->oprm.srate == af->srate && st->oprm.ch == af->ch) {
 		st->rsampsz = 0;
@@ -248,6 +254,10 @@ static int decode_update(struct aufilt_dec_st **stp, void **ctx,
 static int encode(struct aufilt_enc_st *aufilt_enc_st, struct auframe *af)
 {
 	struct auresamp_st *st = (struct auresamp_st *) aufilt_enc_st;
+
+	if (!st || !af)
+		return EINVAL;
+
 	return common_resample(st, af);
 }
 
@@ -255,6 +265,10 @@ static int encode(struct aufilt_enc_st *aufilt_enc_st, struct auframe *af)
 static int decode(struct aufilt_dec_st *aufilt_dec_st, struct auframe *af)
 {
 	struct auresamp_st *st = (struct auresamp_st *) aufilt_dec_st;
+
+	if (!st || !af)
+		return EINVAL;
+
 	return common_resample(st, af);
 }
 
