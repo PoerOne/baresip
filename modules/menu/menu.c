@@ -99,7 +99,8 @@ static char *errorcode_fb_aufile(uint16_t scode)
 	switch (scode) {
 
 	case 404: return "notfound.wav";
-	case 486: return "busy.wav";
+	case 486:
+	case 603: return "busy.wav";
 	case 487: return NULL; /* ignore */
 	default:  return "error.wav";
 	}
@@ -111,24 +112,27 @@ static char *errorcode_key_aufile(uint16_t scode)
 	switch (scode) {
 
 	case 404: return "notfound_aufile";
-	case 486: return "busy_aufile";
+	case 486:
+	case 603:
+		  return "busy_aufile";
 	case 487: return NULL; /* ignore */
 	default:  return "error_aufile";
 	}
 }
 
 
-static void limit_earlyaudio(struct call* call, void *arg)
+static void limit_earlymedia(struct call* call, void *arg)
 {
-	enum sdp_dir ardir, ndir;
+	enum sdp_dir rdir, ndir;
 	uint32_t maxcnt = 32;
+	bool update = false;
 	(void)arg;
 
 	if (!call_is_outgoing(call))
 		return;
 
-	ardir = sdp_media_rdir(stream_sdpmedia(audio_strm(call_audio(call))));
-	ndir  = ardir;
+	rdir = sdp_media_rdir(stream_sdpmedia(audio_strm(call_audio(call))));
+	ndir = rdir;
 	conf_get_u32(conf_cur(), "menu_max_earlyaudio", &maxcnt);
 
 	if (menu.outcnt > maxcnt)
@@ -136,8 +140,35 @@ static void limit_earlyaudio(struct call* call, void *arg)
 	else if (menu.outcnt > 1)
 		ndir &= SDP_SENDONLY;
 
-	if (ndir != ardir)
+	if (ndir != rdir) {
 		call_set_audio_ldir(call, ndir);
+		update = true;
+	}
+
+	/* video */
+	if (!call_video(call))
+		return;
+
+	rdir = sdp_media_rdir(stream_sdpmedia(video_strm(call_video(call))));
+	ndir = rdir;
+
+	maxcnt = 32;
+	conf_get_u32(conf_cur(), "menu_max_earlyvideo_rx", &maxcnt);
+	if (menu.outcnt > maxcnt)
+		ndir &= SDP_SENDONLY;
+
+	maxcnt = 32;
+	conf_get_u32(conf_cur(), "menu_max_earlyvideo_tx", &maxcnt);
+	if (menu.outcnt > maxcnt)
+		ndir &= SDP_RECVONLY;
+
+	if (ndir != rdir) {
+		call_set_video_ldir(call, ndir);
+		update = true;
+	}
+
+	if (update)
+		call_update_media(call);
 }
 
 
@@ -561,6 +592,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 	enum sdp_dir ardir, vrdir;
 	uint32_t count;
 	struct pl val;
+	char * uri;
 	int err;
 	(void)arg;
 
@@ -632,7 +664,7 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 
 	case UA_EVENT_CALL_PROGRESS:
 		menu_selcall(call);
-		uag_filter_calls(limit_earlyaudio, NULL, NULL);
+		uag_filter_calls(limit_earlymedia, NULL, NULL);
 
 		tmr_start(&menu.tmr_play, TONE_DELAY, delayed_play, NULL);
 		break;
@@ -760,6 +792,17 @@ static void ua_event_handler(struct ua *ua, enum ua_event ev,
 		menu_stop_play();
 		call_hold(call, false);
 		menu_selcall(call);
+		break;
+
+	case UA_EVENT_CALL_REDIRECT:
+		uri = strchr(prm, ',') + 1;
+		if (account_sip_autoredirect(ua_account(ua))) {
+			info("menu: redirecting call to %s\n", uri);
+			ua_connect(ua, NULL, NULL, uri, VIDMODE_ON);
+		}
+		else {
+			info("menu: redirect call to %s\n", uri);
+		}
 		break;
 
 	case UA_EVENT_REFER:

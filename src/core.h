@@ -53,6 +53,7 @@ struct account {
 	enum sipansbeep sipansbeep;  /**< Beep mode for SIP auto answer      */
 	enum rel100_mode rel100_mode;  /**< 100rel mode for incoming calls   */
 	enum answermode answermode;  /**< Answermode for incoming calls      */
+	bool autoredirect;           /**< Autoredirect on 3xx reply on/off   */
 	int32_t adelay;              /**< Delay for delayed auto answer [ms] */
 	enum dtmfmode dtmfmode;      /**< Send type for DTMF tones           */
 	struct le acv[16];           /**< List elements for aucodecl         */
@@ -103,6 +104,12 @@ struct audio;
 
 int  audio_send_digit(struct audio *a, char key);
 void audio_sdp_attr_decode(struct audio *a);
+
+
+/*
+ * Audio Codec
+ */
+int aucodec_print(struct re_printf *pf, const struct aucodec *ac);
 
 
 /*
@@ -307,6 +314,8 @@ struct bundle *stream_bundle(const struct stream *strm);
 void stream_parse_mid(struct stream *strm);
 void stream_enable_bundle(struct stream *strm, enum bundle_state st);
 void stream_enable_natpinhole(struct stream *strm, bool enable);
+void stream_open_natpinhole(struct stream *strm);
+void stream_stop_natpinhole(struct stream *strm);
 
 
 /*

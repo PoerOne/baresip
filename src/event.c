@@ -60,13 +60,15 @@ static const char *event_class_name(enum ua_event ev)
 	case UA_EVENT_CALL_ESTABLISHED:
 	case UA_EVENT_CALL_CLOSED:
 	case UA_EVENT_CALL_TRANSFER:
-	case UA_EVENT_CALL_BLIND_TRANSFER:
 	case UA_EVENT_CALL_TRANSFER_FAILED:
+	case UA_EVENT_CALL_REDIRECT:
 	case UA_EVENT_CALL_DTMF_START:
 	case UA_EVENT_CALL_DTMF_END:
 	case UA_EVENT_CALL_RTPESTAB:
 	case UA_EVENT_CALL_RTCP:
 	case UA_EVENT_CALL_MENC:
+	case UA_EVENT_CALL_LOCAL_SDP:
+	case UA_EVENT_CALL_REMOTE_SDP:
 		return "call";
 	case UA_EVENT_VU_RX:
 	case UA_EVENT_VU_TX:
@@ -166,6 +168,8 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 		const char *peerdisplayname;
 		enum sdp_dir ardir;
 		enum sdp_dir vrdir;
+		enum sdp_dir aldir;
+		enum sdp_dir vldir;
 		enum sdp_dir adir;
 		enum sdp_dir vdir;
 
@@ -187,15 +191,17 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 
 		amedia = stream_sdpmedia(audio_strm(call_audio(call)));
 		ardir = sdp_media_rdir(amedia);
+		aldir  = sdp_media_ldir(amedia);
 		adir  = sdp_media_dir(amedia);
 		if (!sa_isset(sdp_media_raddr(amedia), SA_ADDR))
-			ardir = adir = SDP_INACTIVE;
+			ardir = aldir = adir = SDP_INACTIVE;
 
 		vmedia = stream_sdpmedia(video_strm(call_video(call)));
 		vrdir = sdp_media_rdir(vmedia);
+		vldir = sdp_media_ldir(vmedia);
 		vdir  = sdp_media_dir(vmedia);
 		if (!sa_isset(sdp_media_raddr(vmedia), SA_ADDR))
-			vrdir = vdir = SDP_INACTIVE;
+			vrdir = vldir = vdir = SDP_INACTIVE;
 
 		err |= odict_entry_add(od, "remoteaudiodir", ODICT_STRING,
 				sdp_dir_name(ardir));
@@ -205,6 +211,10 @@ int event_encode_dict(struct odict *od, struct ua *ua, enum ua_event ev,
 				sdp_dir_name(adir));
 		err |= odict_entry_add(od, "videodir", ODICT_STRING,
 				sdp_dir_name(vdir));
+		err |= odict_entry_add(od, "localaudiodir", ODICT_STRING,
+				sdp_dir_name(aldir));
+		err |= odict_entry_add(od, "localvideodir", ODICT_STRING,
+				sdp_dir_name(vldir));
 		if (call_diverteruri(call))
 			err |= odict_entry_add(od, "diverteruri", ODICT_STRING,
 					       call_diverteruri(call));
@@ -427,8 +437,8 @@ const char *uag_event_str(enum ua_event ev)
 	case UA_EVENT_CALL_ESTABLISHED:     return "CALL_ESTABLISHED";
 	case UA_EVENT_CALL_CLOSED:          return "CALL_CLOSED";
 	case UA_EVENT_CALL_TRANSFER:        return "TRANSFER";
-	case UA_EVENT_CALL_BLIND_TRANSFER:  return "BLIND_TRANSFER";
 	case UA_EVENT_CALL_TRANSFER_FAILED: return "TRANSFER_FAILED";
+	case UA_EVENT_CALL_REDIRECT:        return "CALL_REDIRECT";
 	case UA_EVENT_CALL_DTMF_START:      return "CALL_DTMF_START";
 	case UA_EVENT_CALL_DTMF_END:        return "CALL_DTMF_END";
 	case UA_EVENT_CALL_RTPESTAB:        return "CALL_RTPESTAB";

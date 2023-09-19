@@ -58,6 +58,7 @@ struct call {
 	bool outgoing;            /**< True if outgoing, false if incoming  */
 	bool answered;            /**< True if call has been answered       */
 	bool got_offer;           /**< Got SDP Offer from Peer              */
+	bool sent_answer;         /**< Sent SDP Answer already              */
 	bool on_hold;             /**< True if call is on hold (local)      */
 	bool ans_queued;          /**< True if an (auto) answer is queued   */
 	struct mnat_sess *mnats;  /**< Media NAT session                    */
@@ -203,9 +204,7 @@ static void call_stream_start(struct call *call, bool active)
 		tmr_cancel(&call->tmr_inv);
 		call->time_start = time(NULL);
 
-		FOREACH_STREAM {
-			stream_flush(le->data);
-		}
+		stream_flush(audio_strm(call->audio));
 	}
 
 	FOREACH_STREAM {
@@ -338,15 +337,10 @@ static int update_audio(struct call *call)
 }
 
 
-static int update_media(struct call *call)
+int call_update_media(struct call *call)
 {
 	struct le *le;
 	int err = 0;
-
-	debug("call: update media\n");
-
-	ua_event(call->ua, UA_EVENT_CALL_REMOTE_SDP, call,
-		 call->got_offer ? "offer" : "answer");
 
 	/* media attributes */
 	audio_sdp_attr_decode(call->audio);
@@ -371,6 +365,8 @@ static int update_media(struct call *call)
 
 	if (stream_is_ready(audio_strm(call->audio)))
 		err |= update_audio(call);
+	else
+		audio_stop(call->audio);
 
 	if (stream_is_ready(video_strm(call->video)))
 		err |= video_update(call->video, call->peer_uri);
@@ -378,6 +374,17 @@ static int update_media(struct call *call)
 		video_stop(call->video);
 
 	return err;
+}
+
+
+static int update_media(struct call *call)
+{
+	debug("call: update media\n");
+
+	ua_event(call->ua, UA_EVENT_CALL_REMOTE_SDP, call,
+		 call->got_offer ? "offer" : "answer");
+
+	return call_update_media(call);
 }
 
 
@@ -1174,13 +1181,16 @@ int call_modify(struct call *call)
 	if (call_refresh_allowed(call)) {
 		err = call_sdp_get(call, &desc, true);
 		if (!err) {
+			ua_event(call->ua, UA_EVENT_CALL_LOCAL_SDP, call,
+				 "offer");
+
 			err = sipsess_modify(call->sess, desc);
 			if (err)
 				goto out;
 		}
 	}
 
-	err = update_media(call);
+	err = call_update_media(call);
 
  out:
 	mem_deref(desc);
@@ -1304,8 +1314,11 @@ int call_progress_dir(struct call *call, enum sdp_dir adir, enum sdp_dir vdir)
 	if (err)
 		goto out;
 
-	if (call->got_offer)
-		err = update_media(call);
+	if (call->got_offer) {
+		ua_event(call->ua, UA_EVENT_CALL_LOCAL_SDP, call, "answer");
+		err = call_update_media(call);
+		call->sent_answer = true;
+	}
 
 	if (err)
 		goto out;
@@ -1372,7 +1385,7 @@ int call_answer(struct call *call, uint16_t scode, enum vidmode vmode)
 
 	if (call->got_offer) {
 
-		err = update_media(call);
+		err = call_update_media(call);
 		if (err)
 			return err;
 	}
@@ -1389,6 +1402,8 @@ int call_answer(struct call *call, uint16_t scode, enum vidmode vmode)
 				"Allow: %H\r\n"
 				"%H", ua_print_allowed, call->ua,
 				ua_print_supported, call->ua);
+		if (!err && call->got_offer)
+			call->sent_answer = true;
 	}
 	else {
 		err = sipsess_answer(call->sess, scode, "Answering", desc,
@@ -1477,6 +1492,23 @@ void call_set_audio_ldir(struct call *call, enum sdp_dir dir)
 		return;
 
 	stream_set_ldir(audio_strm(call_audio(call)), dir);
+}
+
+
+/**
+ * Sets the video local direction of the given call
+ *
+ * @param call  Call object
+ * @param dir   SDP media direction
+ *
+ * @return 0 if success, otherwise errorcode
+ */
+void call_set_video_ldir(struct call *call, enum sdp_dir dir)
+{
+	if (!call)
+		return;
+
+	stream_set_ldir(video_strm(call_video(call)), dir);
 }
 
 
@@ -2362,10 +2394,9 @@ static void redirect_handler(const struct sip_msg *msg, const char *uri,
 {
 	struct call *call = arg;
 
-	info ("call: blind transfer to %s\n", uri);
-	ua_event(call->ua, UA_EVENT_CALL_BLIND_TRANSFER, call,
-		"%d - %s", msg->scode, uri);
-
+	info("call: redirect to %s\n", uri);
+	ua_event(call->ua, UA_EVENT_CALL_REDIRECT, call,
+		 "%d,%s", msg->scode, uri);
 	return;
 }
 
@@ -2792,7 +2823,7 @@ int call_replace_transfer(struct call *call, struct call *source_call)
 			      sipsess_dialog(call->sess), ua_cuser(call->ua),
 			      auth_handler, call->acc, true,
 			      sipsub_notify_handler, sipsub_close_handler,
-			      call, "Refer-To: %s?Replaces=%s\r\n",
+			      call, "Refer-To: <%s?Replaces=%s>\r\n",
 			      source_call->peer_uri, source_call->id);
 	if (err) {
 		warning("call: sipevent_drefer: %m\n", err);
@@ -3138,4 +3169,10 @@ bool call_is_evstop(struct call *call)
 		return false;
 
 	return call->evstop;
+}
+
+
+bool call_sent_answer(const struct call *call)
+{
+	return call ? call->sent_answer : false;
 }

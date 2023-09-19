@@ -88,8 +88,14 @@ static struct config core_config = {
 		{1024, 49152},
 		{0, 0},
 		false,
-		JBUF_FIXED,
-		{5, 10},
+		{
+			JBUF_FIXED,
+			{5, 10},
+		},
+		{
+			JBUF_FIXED,
+			{5, 50},
+		},
 		false,
 		0,
 		false
@@ -306,8 +312,6 @@ static const char *net_af_str(int af)
  */
 int config_parse_conf(struct config *cfg, const struct conf *conf)
 {
-	struct pl pollm;
-	enum poll_method method;
 	struct vidsz size = {0, 0};
 	struct pl txmode;
 	struct pl jbtype;
@@ -318,20 +322,6 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 
 	if (!cfg || !conf)
 		return EINVAL;
-
-	/* Core */
-	if (0 == conf_get(conf, "poll_method", &pollm)) {
-		if (0 == poll_method_type(&method, &pollm)) {
-			err = poll_method_set(method);
-			if (err) {
-				warning("config: poll method (%r) set: %m\n",
-					&pollm, err);
-			}
-		}
-		else {
-			warning("config: unknown poll method (%r)\n", &pollm);
-		}
-	}
 
 	/* SIP */
 	(void)conf_get_str(conf, "sip_listen", cfg->sip.local,
@@ -451,11 +441,31 @@ int config_parse_conf(struct config *cfg, const struct conf *conf)
 		cfg->avt.rtp_bw.max *= 1000;
 	}
 
-	if (0 == conf_get(conf, "jitter_buffer_type", &jbtype))
-		cfg->avt.jbtype = conf_get_jbuf_type(&jbtype);
+	if (0 == conf_get(conf, "jitter_buffer_type", &jbtype)) {
+		cfg->avt.video.jbtype = conf_get_jbuf_type(&jbtype);
+		cfg->avt.audio.jbtype = conf_get_jbuf_type(&jbtype);
+		warning("config: jitter_buffer_* config is deprecated, use "
+			"audio_jitter_buffer_* and "
+			"video_jitter_buffer_* options\n");
+	}
 
 	(void)conf_get_range(conf, "jitter_buffer_delay",
-			     &cfg->avt.jbuf_del);
+			     &cfg->avt.video.jbuf_del);
+	(void)conf_get_range(conf, "jitter_buffer_delay",
+			     &cfg->avt.audio.jbuf_del);
+
+	if (0 == conf_get(conf, "audio_jitter_buffer_type", &jbtype))
+		cfg->avt.audio.jbtype = conf_get_jbuf_type(&jbtype);
+
+	(void)conf_get_range(conf, "audio_jitter_buffer_delay",
+			     &cfg->avt.audio.jbuf_del);
+
+	if (0 == conf_get(conf, "video_jitter_buffer_type", &jbtype))
+		cfg->avt.video.jbtype = conf_get_jbuf_type(&jbtype);
+
+	(void)conf_get_range(conf, "video_jitter_buffer_delay",
+			     &cfg->avt.video.jbuf_del);
+
 	(void)conf_get_bool(conf, "rtp_stats", &cfg->avt.rtp_stats);
 	(void)conf_get_u32(conf, "rtp_timeout", &cfg->avt.rtp_timeout);
 
@@ -554,10 +564,13 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 "rtp_video_tos\t\t%u\n"
 			 "rtp_ports\t\t%H\n"
 			 "rtp_bandwidth\t\t%H\n"
-			 "jitter_buffer_type\t%s\n"
-			 "jitter_buffer_delay\t%H\n"
+			 "audio_jitter_buffer_type\t%s\n"
+			 "audio_jitter_buffer_delay\t%H\n"
+			 "video_jitter_buffer_type\t%s\n"
+			 "video_jitter_buffer_delay\t%H\n"
 			 "rtp_stats\t\t%s\n"
 			 "rtp_timeout\t\t%u # in seconds\n"
+			 "avt_bundle\t\t%s\n"
 			 "\n"
 			 "# Network\n"
 			 "net_interface\t\t%s\n"
@@ -605,10 +618,13 @@ int config_print(struct re_printf *pf, const struct config *cfg)
 			 cfg->avt.rtpv_tos,
 			 range_print, &cfg->avt.rtp_ports,
 			 range_print, &cfg->avt.rtp_bw,
-			 jbuf_type_str(cfg->avt.jbtype),
-			 range_print, &cfg->avt.jbuf_del,
+			 jbuf_type_str(cfg->avt.audio.jbtype),
+			 range_print, &cfg->avt.audio.jbuf_del,
+			 jbuf_type_str(cfg->avt.video.jbtype),
+			 range_print, &cfg->avt.video.jbuf_del,
 			 cfg->avt.rtp_stats ? "yes" : "no",
 			 cfg->avt.rtp_timeout,
+			 cfg->avt.bundle ? "yes" : "no",
 
 			 cfg->net.ifname,
 			 net_af_str(cfg->net.af)
@@ -645,6 +661,8 @@ static const char *default_audio_device(void)
 	#endif
 #elif defined (FREEBSD)
 	return "alsa,default";
+#elif defined (OPENBSD)
+	return "sndio,default";
 #elif defined (WIN32)
 	return "winwave,nil";
 #else
@@ -703,50 +721,58 @@ static int default_interface_print(struct re_printf *pf, void *unused)
 }
 
 
+static const char *default_audio_path(void)
+{
+#if defined (SHARE_PATH)
+	return SHARE_PATH;
+#elif defined (PREFIX)
+	return PREFIX "/share/baresip";
+#else
+	return "/usr/share/baresip";
+#endif
+}
+
+
 static int core_config_template(struct re_printf *pf, const struct config *cfg)
 {
+	bool have_cafile = false;
 	int err = 0;
 
 	if (!cfg)
 		return 0;
 
+#if defined (DEFAULT_CAFILE) || defined (DARWIN) || defined (LINUX) \
+	|| defined (FREEBSD)
+	have_cafile = true;
+#endif
+
 	err |= re_hprintf(pf,
-			  "\n# Core\n"
-			  "poll_method\t\t%s\t\t# poll, select"
-#ifdef HAVE_EPOLL
-				", epoll .."
-#endif
-#ifdef HAVE_KQUEUE
-				", kqueue .."
-#endif
-				"\n"
 			  "\n# SIP\n"
 			  "#sip_listen\t\t0.0.0.0:5060\n"
 			  "#sip_certificate\tcert.pem\n"
-#if defined (DEFAULT_CAFILE) || defined (DARWIN) || defined (LINUX) \
-	|| defined (FREEBSD)
-			 "sip_cafile\t\t%s\n"
-#else
-			 "#sip_cafile\t\t%s\n"
-#endif
+			  "%ssip_cafile\t\t%s\n"
 			  "#sip_transports\t\tudp,tcp,tls,ws,wss\n"
 			  "#sip_trans_def\t\tudp\n"
 			  "#sip_verify_server\tyes\n"
 			  "sip_tos\t\t\t160\n"
 			  "\n"
+			  ,
+			  have_cafile ? "" : "#",
+			  default_cafile());
+
+	err |= re_hprintf(pf,
 			  "# Call\n"
 			  "call_local_timeout\t%u\n"
 			  "call_max_calls\t\t%u\n"
 			  "call_hold_other_calls\tyes\n"
 			  "\n"
+			  ,
+			  cfg->call.local_timeout,
+			  cfg->call.max_calls);
+
+	err |= re_hprintf(pf,
 			  "# Audio\n"
-#if defined (SHARE_PATH)
-			  "#audio_path\t\t" SHARE_PATH "\n"
-#elif defined (PREFIX)
-			  "#audio_path\t\t" PREFIX "/share/baresip\n"
-#else
-			  "#audio_path\t\t/usr/share/baresip\n"
-#endif
+			  "#audio_path\t\t%s\n"
 			  "audio_player\t\t%s\n"
 			  "audio_source\t\t%s\n"
 			  "audio_alert\t\t%s\n"
@@ -765,11 +791,9 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "audio_silence\t\t%.1lf\t\t# in [dB]\n"
 			  "audio_telev_pt\t\t%u\t\t"
 			  "# payload type for telephone-event\n"
+			  "\n"
 			  ,
-			  poll_method_name(poll_method_best()),
-			  default_cafile(),
-			  cfg->call.local_timeout,
-			  cfg->call.max_calls,
+			  default_audio_path(),
 			  default_audio_device(),
 			  default_audio_device(),
 			  default_audio_device(),
@@ -779,7 +803,7 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  cfg->audio.telev_pt);
 
 	err |= re_hprintf(pf,
-			  "\n# Video\n"
+			  "# Video\n"
 			  "#video_source\t\t%s\n"
 			  "#video_display\t\t%s\n"
 			  "video_size\t\t%dx%d\n"
@@ -800,11 +824,17 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "rtp_video_tos\t\t136\n"
 			  "#rtp_ports\t\t10000-20000\n"
 			  "#rtp_bandwidth\t\t512-1024 # [kbit/s]\n"
-			  "jitter_buffer_type\tfixed\t\t# off, fixed,"
+			  "audio_jitter_buffer_type\tfixed\t\t# off, fixed,"
 				" adaptive\n"
-			  "jitter_buffer_delay\t%u-%u\t\t# frames\n"
+			  "audio_jitter_buffer_delay\t%u-%u\t\t"
+					"# (min. frames)-(max. packets)\n"
+			  "video_jitter_buffer_type\tfixed\t\t# off, fixed,"
+				" adaptive\n"
+			  "video_jitter_buffer_delay\t%u-%u\t\t"
+					"# (min. frames)-(max. packets)\n"
 			  "rtp_stats\t\tno\n"
 			  "#rtp_timeout\t\t60\n"
+			  "#avt_bundle\t\tno\n"
 			  "\n# Network\n"
 			  "#dns_server\t\t1.1.1.1:53\n"
 			  "#dns_server\t\t1.0.0.1:53\n"
@@ -816,7 +846,10 @@ static int core_config_template(struct re_printf *pf, const struct config *cfg)
 			  "#file_ausrc\t\taufile\n"
 			  "#file_srate\t\t16000\n"
 			  "#file_channels\t\t1\n",
-			  cfg->avt.jbuf_del.min, cfg->avt.jbuf_del.max,
+			  cfg->avt.audio.jbuf_del.min,
+			  cfg->avt.audio.jbuf_del.max,
+			  cfg->avt.video.jbuf_del.min,
+			  cfg->avt.video.jbuf_del.max,
 			  default_interface_print, NULL);
 
 	return err;
@@ -998,16 +1031,25 @@ int config_write_template(const char *file, const struct config *cfg)
 	#endif
 #elif defined (FREEBSD)
 	(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
+#elif defined (OPENBSD)
+	(void)re_fprintf(f, "module\t\t\t" "sndio" MOD_EXT "\n");
 #elif defined (WIN32)
 	(void)re_fprintf(f, "module\t\t\t" "winwave" MOD_EXT "\n");
 #else
-	if (!strncmp(default_audio_device(), "pulse", 5)) {
+	if (!strncmp(default_audio_device(), "pipewire", 8)) {
+		(void)re_fprintf(f, "#module\t\t\t" "alsa" MOD_EXT "\n");
+		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT "\n");
+		(void)re_fprintf(f, "module\t\t\t" "pipewire" MOD_EXT "\n");
+	}
+	else if (!strncmp(default_audio_device(), "pulse", 5)) {
 		(void)re_fprintf(f, "#module\t\t\t" "alsa" MOD_EXT "\n");
 		(void)re_fprintf(f, "module\t\t\t" "pulse" MOD_EXT "\n");
+		(void)re_fprintf(f, "#module\t\t\t" "pipewire" MOD_EXT "\n");
 	}
 	else {
 		(void)re_fprintf(f, "module\t\t\t" "alsa" MOD_EXT "\n");
 		(void)re_fprintf(f, "#module\t\t\t" "pulse" MOD_EXT"\n");
+		(void)re_fprintf(f, "#module\t\t\t" "pipewire" MOD_EXT "\n");
 	}
 #endif
 	(void)re_fprintf(f, "#module\t\t\t" "jack" MOD_EXT "\n");
@@ -1151,11 +1193,6 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#selfview_size\t\t64x64\n");
 
 	(void)re_fprintf(f,
-			"\n# ZRTP\n"
-			"#zrtp_hash\t\tno  # Disable SDP zrtp-hash "
-			"(not recommended)\n");
-
-	(void)re_fprintf(f,
 			"\n# Menu\n"
 			"#redial_attempts\t0 # Num or <inf>\n"
 			"#redial_delay\t\t5 # Delay in seconds\n"
@@ -1172,6 +1209,8 @@ int config_write_template(const char *file, const struct config *cfg)
 			"#error_aufile\t\terror.wav\n"
 			"#sip_autoanswer_aufile\tautoanswer.wav\n"
 			"#menu_max_earlyaudio\t32\n"
+			"#menu_max_earlyvideo_rx\t32\n"
+			"#menu_max_earlyvideo_tx\t32\n"
 			);
 
 	(void)re_fprintf(f,

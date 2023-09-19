@@ -148,8 +148,7 @@ static int media_decode(struct account *acc, const struct pl *prm)
 	err |= param_dstr(&acc->mnatid,   prm, "medianat");
 	err |= param_u32(&acc->ptime,     prm, "ptime");
 	err |= param_bool(&acc->rtcp_mux, prm, "rtcp_mux");
-	acc->pinhole = true;
-	err |= param_bool(&acc->pinhole, &acc->laddr.params, "natpinhole");
+	err |= param_bool(&acc->pinhole, prm,  "natpinhole");
 
 	return err;
 }
@@ -526,6 +525,11 @@ static int sip_params_decode(struct account *acc, const struct sip_addr *aor)
 		acc->refer = true;
 	else
 		acc->refer = pl_strcasecmp(&tmp, "no") != 0;
+
+	if (0 != msg_param_decode(&aor->params, "sip_autoredirect", &tmp))
+		acc->autoredirect = false;
+	else
+		acc->autoredirect = pl_strcasecmp(&tmp, "yes") == 0;
 
 	return err;
 }
@@ -1545,6 +1549,27 @@ void account_set_sip_autoanswer(struct account *acc, bool allow)
 
 
 /**
+ * Returns if SIP autoredirect on 3xx response is allowed for the account
+ *
+ * @param acc User-Agent account
+ * @return true if allowed, otherwise false
+ */
+bool account_sip_autoredirect(const struct account *acc)
+{
+	return acc ? acc->autoredirect : false;
+}
+
+
+void account_set_sip_autoredirect(struct account *acc, bool allow)
+{
+	if (!acc)
+		return;
+
+	acc->autoredirect = allow;
+}
+
+
+/**
  * Returns the beep mode for a SIP auto answer call
  *
  * - SIPANSBEEP_ON    ... The beep is played before the call is answered
@@ -1904,6 +1929,8 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 			  rel100_mode_str(acc->rel100_mode));
 	err |= re_hprintf(pf, " answermode:   %s\n",
 			  answermode_str(acc->answermode));
+	err |= re_hprintf(pf, " autoredirect:   %s\n",
+			  acc->autoredirect ? "yes" : "no");
 	err |= re_hprintf(pf, " sipans:       %s\n",
 			  acc->sipans ? "yes" : "no");
 	err |= re_hprintf(pf, " sipansbeep:   %s\n",
@@ -1925,6 +1952,8 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 			  acc->mencid ? acc->mencid : "none");
 	err |= re_hprintf(pf, " medianat:     %s\n",
 			  acc->mnatid ? acc->mnatid : "none");
+	err |= re_hprintf(pf, " natpinhole:   %s\n",
+			  acc->pinhole ? "yes" : "no");
 	for (i=0; i<RE_ARRAY_SIZE(acc->outboundv); i++) {
 		if (acc->outboundv[i]) {
 			err |= re_hprintf(pf, " outbound%d:    %s\n",
@@ -1938,6 +1967,7 @@ int account_debug(struct re_printf *pf, const struct account *acc)
 	err |= re_hprintf(pf, " prio:         %u\n", acc->prio);
 	err |= re_hprintf(pf, " pubint:       %u\n", acc->pubint);
 	err |= re_hprintf(pf, " regq:         %s\n", acc->regq);
+	err |= re_hprintf(pf, " rtcp_mux:     %s\n", acc->rtcp_mux);
 	err |= re_hprintf(pf, " sipnat:       %s\n", acc->sipnat);
 	err |= re_hprintf(pf, " stunuser:     %s\n", acc->stun_user);
 	err |= re_hprintf(pf, " stunserver:   %H\n",

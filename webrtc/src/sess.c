@@ -35,7 +35,7 @@ static void peerconnection_gather_handler(void *arg)
 		break;
 
 	case SS_HAVE_LOCAL_OFFER:
-		warning("illegal state\n");
+		warning("demo: illegal state HAVE_LOCAL_OFFER\n");
 		type = SDP_OFFER;
 		break;
 
@@ -152,14 +152,14 @@ int session_start(struct session *sess,
 	}
 
 	err = peerconnection_add_audio_track(sess->pc, config,
-					     baresip_aucodecl());
+					     baresip_aucodecl(), SDP_SENDRECV);
 	if (err) {
 		warning("demo: add_audio failed (%m)\n", err);
 		return err;
 	}
 
-	err = peerconnection_add_video_track(sess->pc, config,
-					     baresip_vidcodecl());
+	err = peerconnection_add_video_track(
+		sess->pc, config, baresip_vidcodecl(), SDP_SENDRECV);
 	if (err) {
 		warning("demo: add_video failed (%m)\n", err);
 		return err;
@@ -223,6 +223,9 @@ int session_handle_ice_candidate(struct session *sess, const struct odict *od)
 	char *cand2 = NULL;
 	int err;
 
+	if (!sess || !od)
+		return EINVAL;
+
 	cand = odict_string(od, "candidate");
 	mid  = odict_string(od, "sdpMid");
 	if (!cand || !mid) {
@@ -246,6 +249,9 @@ int session_handle_ice_candidate(struct session *sess, const struct odict *od)
 
 void session_close(struct session *sess, int err)
 {
+	if (!sess)
+		return;
+
 	if (err)
 		warning("demo: session '%s' closed (%m)\n", sess->id, err);
 	else

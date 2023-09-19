@@ -144,7 +144,6 @@ baresip is using CMake, and the following packages must be
 installed before building:
 
 * [libre](https://github.com/baresip/re)
-* [librem](https://github.com/baresip/rem)
 * [openssl](https://www.openssl.org/)
 
 See [Wiki: Install Stable Release](https://github.com/baresip/baresip/wiki/Install:-Stable-Release)
@@ -203,6 +202,17 @@ $ build/baresip
 The config files in $HOME/.baresip are automatically generated
 the first time you run baresip.
 
+### Build documentation
+
+The api documentation can be build using [doxygen](https://www.doxygen.nl/manual/install.html).
+
+```
+$ doxygen mk/Doxyfile
+```
+
+By default the documentation is written to `../baresip-dox`, if you want to
+change the destination directory you can change the `OUTPUT_DIRECTORY` in
+`mk/Doxyfile`.
 
 ### Examples
 
@@ -300,6 +310,7 @@ selfview      Video selfview module
 serreg        Serial registration
 snapshot      Save video-stream as PNG images
 sndfile       Audio dumper using libsndfile
+sndio         Audio driver for OpenBSD
 srtp          Secure RTP encryption (SDES) using libre SRTP-stack
 stdio         Standard input/output UI driver
 stun          Session Traversal Utilities for NAT (STUN) module
@@ -369,6 +380,7 @@ x11           X11 video output driver
 * RFC 7741  RTP Payload Format for VP8 Video
 * RFC 7742  WebRTC Video Processing and Codec Requirements
 * RFC 7798  RTP Payload Format for High Efficiency Video Coding (HEVC)
+* RFC 8285  A General Mechanism for RTP Header Extensions
 * RFC 8843  Negotiating Media Multiplexing Using SDP
 
 * draft-ietf-payload-vp9-16
@@ -413,10 +425,8 @@ x11           X11 video output driver
 ## Related projects
 
 * [libre - baresip fork](https://github.com/baresip/re)
-* [librem - baresip fork](https://github.com/baresip/rem)
 * [retest - baresip fork](https://github.com/baresip/retest)
 * [libre](https://github.com/creytiv/re)
-* [librem](https://github.com/creytiv/rem)
 * [retest](https://github.com/creytiv/retest)
 
 

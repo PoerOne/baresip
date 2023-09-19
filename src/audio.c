@@ -162,9 +162,6 @@ struct aurx {
 		uint64_t n_discard;
 	} stats;
 
-	enum jbuf_type jbtype;       /**< Jitter buffer type               */
-	volatile int32_t wcnt;       /**< Write handler call count         */
-
 	mtx_t *mtx;
 
 };
@@ -1082,7 +1079,6 @@ int audio_alloc(struct audio **ap, struct list *streaml,
 
 	tx->enc_fmt = cfg->audio.enc_fmt;
 	rx->dec_fmt = cfg->audio.dec_fmt;
-	rx->jbtype  = cfg->avt.jbtype;
 
 	err = stream_alloc(&a->strm, streaml,
 			   stream_prm, &cfg->avt, sdp_sess,
@@ -1615,6 +1611,21 @@ static int start_source(struct autx *tx, struct audio *a, struct list *ausrcl)
 }
 
 
+static void audio_flush_filters(struct audio *a)
+{
+	struct aurx *rx = &a->rx;
+	struct autx *tx = &a->tx;
+
+	mtx_lock(rx->mtx);
+	list_flush(&rx->filtl);
+	mtx_unlock(rx->mtx);
+
+	mtx_lock(a->tx.mtx);
+	list_flush(&tx->filtl);
+	mtx_unlock(a->tx.mtx);
+}
+
+
 /**
  * Start the audio playback and recording
  *
@@ -1757,25 +1768,20 @@ int audio_encoder_set(struct audio *a, const struct aucodec *ac,
 {
 	struct autx *tx;
 	int err = 0;
-	bool reset;
 
 	if (!a || !ac)
 		return EINVAL;
 
 	tx = &a->tx;
 
-	reset = !aucodec_equal(ac, tx->ac);
-
 	if (ac != tx->ac) {
 		info("audio: Set audio encoder: %s %uHz %dch\n",
 		     ac->name, ac->srate, ac->ch);
 
-		/* Audio source must be stopped first */
-		if (reset) {
+		/* Should the source be stopped first? */
+		if (!aucodec_equal(ac, tx->ac)) {
 			tx->ausrc = mem_deref(tx->ausrc);
-			mtx_lock(a->tx.mtx);
-			list_flush(&tx->filtl);
-			mtx_unlock(a->tx.mtx);
+			audio_flush_filters(a);
 			aubuf_flush(tx->aubuf);
 		}
 
@@ -1804,12 +1810,8 @@ int audio_encoder_set(struct audio *a, const struct aucodec *ac,
 	telev_set_srate(a->telev, ac->crate);
 
 	/* use a codec-specific ptime */
-	if (ac->ptime) {
-		const size_t sz = aufmt_sample_size(tx->src_fmt);
-
+	if (ac->ptime)
 		tx->ptime = ac->ptime;
-		tx->psize = sz * calc_nsamp(ac->srate, ac->ch, ac->ptime);
-	}
 
 	if (!tx->ausrc) {
 		err |= audio_start(a);
@@ -1833,8 +1835,6 @@ int audio_decoder_set(struct audio *a, const struct aucodec *ac,
 		      int pt_rx, const char *params)
 {
 	struct aurx *rx;
-	struct sdp_media *m;
-	bool reset = false;
 	int err = 0;
 
 	if (!a || !ac)
@@ -1842,22 +1842,19 @@ int audio_decoder_set(struct audio *a, const struct aucodec *ac,
 
 	rx = &a->rx;
 
-	reset = !aucodec_equal(ac, rx->ac);
-	m = stream_sdpmedia(audio_strm(a));
-	reset |= sdp_media_dir(m)!=SDP_SENDRECV;
-
-	if (reset || ac != rx->ac) {
-		rx->auplay = mem_deref(rx->auplay);
-		aubuf_flush(rx->aubuf);
-		stream_flush(a->strm);
-
-		/* Reset audio filter chain */
-		mtx_lock(rx->mtx);
-		list_flush(&rx->filtl);
-		mtx_unlock(rx->mtx);
-	}
-
 	if (ac != rx->ac) {
+		struct sdp_media *m;
+		bool reset;
+
+		m = stream_sdpmedia(audio_strm(a));
+		reset  = !aucodec_equal(ac, rx->ac);
+		reset |= !(sdp_media_dir(m) & SDP_RECVONLY);
+		if (reset) {
+			rx->auplay = mem_deref(rx->auplay);
+			audio_flush_filters(a);
+			aubuf_flush(rx->aubuf);
+			stream_flush(a->strm);
+		}
 
 		info("audio: Set audio decoder: %s %uHz %dch\n",
 		     ac->name, ac->srate, ac->ch);
@@ -2091,16 +2088,6 @@ int audio_level_get(const struct audio *au, double *levelp)
 		*levelp = au->rx.level_last;
 
 	return 0;
-}
-
-
-static int aucodec_print(struct re_printf *pf, const struct aucodec *ac)
-{
-	if (!ac)
-		return 0;
-
-	return re_hprintf(pf, "%s %uHz/%dch",
-			  ac->name, ac->srate, ac->ch);
 }
 
 

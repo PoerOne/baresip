@@ -583,7 +583,7 @@ static void call_dtmf_handler(struct call *call, char key, void *arg)
 
 	MAGIC_CHECK(ua);
 
-	if (key != KEYCODE_REL) {
+	if (key != KEYCODE_NONE && key != KEYCODE_REL) {
 
 		key_str[0] = key;
 		key_str[1] = '\0';
@@ -1202,6 +1202,7 @@ static int append_params(struct mbuf *mb, struct pl *params)
 {
 	char param[512];
 	char *str = NULL;
+	char *buf = NULL;
 	char *pstr;
 	char *token;
 	int err;
@@ -1213,16 +1214,21 @@ static int append_params(struct mbuf *mb, struct pl *params)
 	if (err || !str)
 		return err ? err : ENOMEM;
 
+	err = mbuf_strdup(mb, &buf, mbuf_get_left(mb));
+	if (err)
+		return err;
+
 	pstr = str;
 	while((token = strtok(pstr, ";"))) {
 		re_snprintf(param, sizeof(param), ";%s", token);
-		if (re_regex((const char *)mb->buf, mb->end, param))
+		if (strstr(buf, param) == NULL)
 			mbuf_write_str(mb, param);
 
 		pstr = NULL;
 	}
 
 	mem_deref(str);
+	mem_deref(buf);
 	return 0;
 }
 

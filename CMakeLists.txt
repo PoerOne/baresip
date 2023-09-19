@@ -3,6 +3,7 @@
 #
 # Copyright (C) 2010 - 2022 Alfred E. Heggestad
 # Copyright (C) 2022 Sebastian Reimers
+# Copyright (C) 2023 Christian Spielberger
 #
 
 ##############################################################################
@@ -12,9 +13,9 @@
 
 cmake_minimum_required(VERSION 3.13)
 
-project(baresip VERSION 3.0.0)
+project(baresip VERSION 3.5.1)
 
-set(PROJECT_SOVERSION 5) # bump if ABI breaks
+set(PROJECT_SOVERSION 9) # bump if ABI breaks
 
 # Pre-release identifier, comment out on a release
 # Increment for breaking changes (dev2, dev3...)
@@ -77,7 +78,11 @@ else()
   )
 
   if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-      list(APPEND c_flags -Watomic-implicit-seq-cst -Wshorten-64-to-32)
+    list(APPEND c_flags
+      -Watomic-implicit-seq-cst
+      -Wshorten-64-to-32
+      -Wno-gnu-zero-variadic-macro-arguments
+    )
   endif()
 
   add_compile_options(
@@ -90,13 +95,13 @@ endif()
 find_package(re CONFIG REQUIRED HINTS ../re/cmake)
 
 list(APPEND RE_DEFINITIONS
-  -DVERSION="${PROJECT_VERSION_FULL}"
-  -DVER_MAJOR=${PROJECT_VERSION_MAJOR}
-  -DVER_MINOR=${PROJECT_VERSION_MINOR}
-  -DVER_PATCH=${PROJECT_VERSION_PATCH}
+  VERSION="${PROJECT_VERSION_FULL}"
+  VER_MAJOR=${PROJECT_VERSION_MAJOR}
+  VER_MINOR=${PROJECT_VERSION_MINOR}
+  VER_PATCH=${PROJECT_VERSION_PATCH}
 )
 
-add_definitions(${RE_DEFINITIONS})
+add_compile_definitions(${RE_DEFINITIONS})
 
 include_directories(
   include
@@ -244,7 +249,7 @@ endif()
 
 if(WIN32)
   list(APPEND LINKLIBS ws2_32 iphlpapi winmm gdi32 crypt32 strmiids
-      ole32 oleaut32 qwave)
+      ole32 oleaut32 qwave dbghelp)
 else()
   list(APPEND LINKLIBS -lm ${RESOLV_LIBRARY})
 endif()

@@ -23,7 +23,7 @@
 #    ;cert=cert.pem
 #    ;mediaenc={srtp,srtp-mand,srtp-mandf,dtls_srtp,zrtp}
 #    ;medianat={stun,turn,ice}
-#    ;natpinhole={yes, no}  # default: yes
+#    ;natpinhole={yes, no}  # default: no
 #    ;mwi=no
 #    ;outbound="sip:primary.example.com;transport=tcp"
 #    ;outbound2=sip:secondary.example.com
@@ -34,7 +34,9 @@
 #    ;rwait=90
 #    ;pubint=0 (publishing off)
 #    ;regq=0.5
+#    ;rtcp_mux={yes, no}  # default: no
 #    ;sipnat={outbound}
+#    ;sip_autoredirect={yes, no}  # default: no
 #    ;stunuser=STUN/TURN/ICE-username
 #    ;stunpass=STUN/TURN/ICE-password
 #    ;stunserver=stun:[user:pass]@host[:port]  # see RFC 3986: Use of the format "user:password" in the userinfo field is deprecated.

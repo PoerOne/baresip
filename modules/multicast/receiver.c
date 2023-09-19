@@ -835,8 +835,8 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 	mcreceiver->muted = false;
 	mcreceiver->state = LISTENING;
 
-	jbuf_del  = cfg->jbuf_del;
-	jbtype = cfg->jbtype;
+	jbuf_del  = cfg->audio.jbuf_del;
+	jbtype = cfg->audio.jbtype;
 	(void)conf_get_range(conf_cur(), "multicast_jbuf_delay", &jbuf_del);
 	if (0 == conf_get(conf_cur(), "multicast_jbuf_type", &pl))
 		jbtype = conf_get_jbuf_type(&pl);
@@ -850,7 +850,7 @@ int mcreceiver_alloc(struct sa *addr, uint8_t prio)
 		rtp_handler_wrapper, mcreceiver);
 	if (err) {
 		warning("multicast receiver: udp listen failed:"
-			"af=%s port=%u-&u (%m)\n", net_af2name(sa_af(addr)),
+			"af=%s port=%u-%u (%m)\n", net_af2name(sa_af(addr)),
 			port, port + 1, err);
 		goto out;
 	}

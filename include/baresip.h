@@ -13,7 +13,7 @@ extern "C" {
 
 
 /** Defines the Baresip version string */
-#define BARESIP_VERSION "3.0.0"
+#define BARESIP_VERSION "3.5.1"
 
 
 #ifndef NET_MAX_NS
@@ -138,6 +138,8 @@ int account_answerdelay(const struct account *acc);
 void account_set_answerdelay(struct account *acc, int adelay);
 bool account_sip_autoanswer(const struct account *acc);
 void account_set_sip_autoanswer(struct account *acc, bool allow);
+bool account_sip_autoredirect(const struct account *acc);
+void account_set_sip_autoredirect(struct account *acc, bool allow);
 enum sipansbeep account_sipansbeep(const struct account *acc);
 void account_set_sipansbeep(struct account *acc, enum sipansbeep beep);
 void account_set_autelev_pt(struct account *acc, uint32_t pt);
@@ -204,7 +206,9 @@ void call_hangup(struct call *call, uint16_t scode, const char *reason);
 int  call_modify(struct call *call);
 int  call_hold(struct call *call, bool hold);
 void call_set_audio_ldir(struct call *call, enum sdp_dir dir);
+void call_set_video_ldir(struct call *call, enum sdp_dir dir);
 int  call_set_video_dir(struct call *call, enum sdp_dir dir);
+int  call_update_media(struct call *call);
 int  call_send_digit(struct call *call, char key);
 bool call_has_audio(const struct call *call);
 bool call_has_video(const struct call *call);
@@ -252,6 +256,7 @@ const char   *call_user_data(const struct call *call);
 int call_set_user_data(struct call *call, const char *user_data);
 void call_set_evstop(struct call *call, bool stop);
 bool call_is_evstop(struct call *call);
+bool call_sent_answer(const struct call *call);
 
 /*
  * Custom headers
@@ -380,8 +385,14 @@ struct config_avt {
 	struct range rtp_ports; /**< RTP port range                 */
 	struct range rtp_bw;    /**< RTP Bandwidth range [bit/s]    */
 	bool rtcp_mux;          /**< RTP/RTCP multiplexing          */
-	enum jbuf_type jbtype;  /**< Jitter buffer type             */
-	struct range jbuf_del;  /**< Delay, number of frames        */
+	struct {
+		enum jbuf_type jbtype;  /**< Jitter buffer type     */
+		struct range jbuf_del;  /**< Delay, number of frames*/
+	} audio;
+	struct {
+		enum jbuf_type jbtype;  /**< Jitter buffer type     */
+		struct range jbuf_del;  /**< Delay, number of frames*/
+	} video;
 	bool rtp_stats;         /**< Enable RTP statistics          */
 	uint32_t rtp_timeout;   /**< RTP Timeout in seconds (0=off) */
 	bool bundle;            /**< Media Multiplexing (BUNDLE)    */
@@ -800,7 +811,7 @@ enum ua_event {
 	UA_EVENT_CALL_ESTABLISHED,
 	UA_EVENT_CALL_CLOSED,
 	UA_EVENT_CALL_TRANSFER,
-	UA_EVENT_CALL_BLIND_TRANSFER,
+	UA_EVENT_CALL_REDIRECT,
 	UA_EVENT_CALL_TRANSFER_FAILED,
 	UA_EVENT_CALL_DTMF_START,
 	UA_EVENT_CALL_DTMF_END,
@@ -1187,12 +1198,12 @@ struct vidcodec;
 typedef int (videnc_packet_h)(bool marker, uint64_t rtp_ts,
 			      const uint8_t *hdr, size_t hdr_len,
 			      const uint8_t *pld, size_t pld_len,
-			      void *arg);
+			      const struct video *vid);
 
 typedef int (videnc_update_h)(struct videnc_state **vesp,
 			      const struct vidcodec *vc,
 			      struct videnc_param *prm, const char *fmtp,
-			      videnc_packet_h *pkth, void *arg);
+			      videnc_packet_h *pkth, const struct video *vid);
 
 typedef int (videnc_encode_h)(struct videnc_state *ves, bool update,
 			      const struct vidframe *frame,
@@ -1201,8 +1212,10 @@ typedef int (videnc_encode_h)(struct videnc_state *ves, bool update,
 typedef int (videnc_packetize_h)(struct videnc_state *ves,
 				 const struct vidpacket *packet);
 
-typedef int (viddec_update_h)(struct viddec_state **vdsp,
-			      const struct vidcodec *vc, const char *fmtp);
+typedef int(viddec_update_h)(struct viddec_state **vdsp,
+			     const struct vidcodec *vc, const char *fmtp,
+			     const struct video *vid);
+
 typedef int (viddec_decode_h)(struct viddec_state *vds, struct vidframe *frame,
                               bool *intra, bool marker, uint16_t seq,
                               struct mbuf *mb);
@@ -1369,6 +1382,8 @@ int   video_set_fullscreen(struct video *v, bool fs);
 void  video_vidsrc_set_device(struct video *v, const char *dev);
 int   video_set_source(struct video *v, const char *name, const char *dev);
 void  video_set_devicename(struct video *v, const char *src, const char *disp);
+const char *video_get_src_dev(const struct video *v);
+const char *video_get_disp_dev(const struct video *v);
 int   video_debug(struct re_printf *pf, const struct video *v);
 struct stream *video_strm(const struct video *v);
 const struct vidcodec *video_codec(const struct video *vid, bool tx);
@@ -1418,7 +1433,6 @@ int  stream_start_mediaenc(struct stream *strm);
 int  stream_start_rtcp(const struct stream *strm);
 int  stream_enable(struct stream *strm, bool enable);
 int  stream_enable_tx(struct stream *strm, bool enable);
-int stream_open_natpinhole(struct stream *strm);
 void stream_mnat_attr(struct stream *strm, const char *name,
 		      const char *value);
 void stream_set_session_handlers(struct stream *strm,
@@ -1690,12 +1704,12 @@ int  peerconnection_new(struct peer_connection **pcp,
 		        peerconnection_gather_h *gatherh,
 		        peerconnection_estab_h,
 		        peerconnection_close_h *closeh, void *arg);
-int  peerconnection_add_audio_track(struct peer_connection *pc,
-			 const struct config *cfg,
-			 struct list *aucodecl);
-int  peerconnection_add_video_track(struct peer_connection *pc,
-			 const struct config *cfg,
-			 struct list *vidcodecl);
+int peerconnection_add_audio_track(struct peer_connection *pc,
+				   const struct config *cfg,
+				   struct list *aucodecl, enum sdp_dir dir);
+int peerconnection_add_video_track(struct peer_connection *pc,
+				   const struct config *cfg,
+				   struct list *vidcodecl, enum sdp_dir dir);
 int  peerconnection_set_remote_descr(struct peer_connection *pc,
 				    const struct session_description *sd);
 int  peerconnection_create_offer(struct peer_connection *sess,

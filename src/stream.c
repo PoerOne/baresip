@@ -282,8 +282,11 @@ static void check_rtp_handler(void *arg)
 
 		diff_ms = (int)(now - strm->rx.ts_last);
 
-		debug("stream: last \"%s\" RTP packet: %d milliseconds\n",
-		      sdp_media_name(strm->sdp), diff_ms);
+		if (diff_ms > 100) {
+			debug("stream: last \"%s\" RTP packet: %d "
+			      "milliseconds\n",
+			      sdp_media_name(strm->sdp), diff_ms);
+		}
 
 		/* check for large jumps in time */
 		if (diff_ms > (3600 * 1000)) {
@@ -343,7 +346,6 @@ static int handle_rtp(struct stream *s, const struct rtp_header *hdr,
 		const size_t pos = mb->pos;
 		const size_t end = mb->end;
 		const size_t ext_stop = mb->pos;
-		size_t ext_len;
 		size_t i;
 		int err;
 
@@ -353,7 +355,7 @@ static int handle_rtp(struct stream *s, const struct rtp_header *hdr,
 			goto handler;
 		}
 
-		ext_len = hdr->x.len*sizeof(uint32_t);
+		size_t ext_len = hdr->x.len*sizeof(uint32_t);
 		if (mb->pos < ext_len) {
 			warning("stream: corrupt rtp packet,"
 				" not enough space for rtpext of %zu bytes\n",
@@ -468,9 +470,11 @@ static void rtp_handler(const struct sa *src, const struct rtp_header *hdr,
 			metric_inc_err(s->rx.metric);
 		}
 
-
-		if (stream_decode(s) == EAGAIN)
-			(void) stream_decode(s);
+		uint32_t n = jbuf_packets(s->rx.jbuf);
+		while (n--) {
+			if (stream_decode(s) != EAGAIN)
+				break;
+		}
 	}
 	else {
 		(void)handle_rtp(s, hdr, mb, 0, false);
@@ -543,7 +547,8 @@ static void rtcp_handler(const struct sa *src, struct rtcp_msg *msg, void *arg)
 static int stream_sock_alloc(struct stream *s, int af)
 {
 	struct sa laddr;
-	int tos, err;
+	uint8_t tos;
+	int err;
 
 	if (!s)
 		return EINVAL;
@@ -562,14 +567,15 @@ static int stream_sock_alloc(struct stream *s, int af)
 	}
 
 	tos = s->type == MEDIA_AUDIO ? s->cfg.rtp_tos : s->cfg.rtpv_tos;
-	(void)udp_setsockopt(rtp_sock(s->rtp), IPPROTO_IP, IP_TOS,
-			     &tos, sizeof(tos));
-	(void)udp_setsockopt(rtcp_sock(s->rtp), IPPROTO_IP, IP_TOS,
-			     &tos, sizeof(tos));
+	(void)udp_settos(rtp_sock(s->rtp), tos);
+	(void)udp_settos(rtcp_sock(s->rtp), tos);
 
 	udp_rxsz_set(rtp_sock(s->rtp), RTP_RECV_SIZE);
 
-	udp_sockbuf_set(rtp_sock(s->rtp), 65536);
+	if (s->type == MEDIA_VIDEO)
+		udp_sockbuf_set(rtp_sock(s->rtp), 65536 * 8);
+	else
+		udp_sockbuf_set(rtp_sock(s->rtp), 65536);
 
 	return 0;
 }
@@ -783,12 +789,24 @@ int stream_alloc(struct stream **sp, struct list *streaml,
 			goto out;
 	}
 
-	/* Jitter buffer */
-	if (prm->use_rtp && cfg->jbtype != JBUF_OFF && cfg->jbuf_del.max) {
+	/* Audio Jitter buffer */
+	if (s->type == MEDIA_AUDIO && prm->use_rtp &&
+	    cfg->audio.jbtype != JBUF_OFF && cfg->audio.jbuf_del.max) {
 
-		err  = jbuf_alloc(&s->rx.jbuf, cfg->jbuf_del.min,
-				cfg->jbuf_del.max);
-		err |= jbuf_set_type(s->rx.jbuf, cfg->jbtype);
+		err = jbuf_alloc(&s->rx.jbuf, cfg->audio.jbuf_del.min,
+				 cfg->audio.jbuf_del.max);
+		err |= jbuf_set_type(s->rx.jbuf, cfg->audio.jbtype);
+		if (err)
+			goto out;
+	}
+
+	/* Video Jitter buffer */
+	if (s->type == MEDIA_VIDEO && prm->use_rtp &&
+	    cfg->video.jbtype != JBUF_OFF && cfg->video.jbuf_del.max) {
+
+		err = jbuf_alloc(&s->rx.jbuf, cfg->video.jbuf_del.min,
+				 cfg->video.jbuf_del.max);
+		err |= jbuf_set_type(s->rx.jbuf, cfg->video.jbtype);
 		if (err)
 			goto out;
 	}
@@ -1603,18 +1621,23 @@ int stream_enable(struct stream *strm, bool enable)
  * Open NAT-pinhole via RTP empty package
  *
  * @param strm	Stream object
- *
- * @return int 0 if success, otherwise errorcode
  */
-int stream_open_natpinhole(struct stream *strm)
+void stream_open_natpinhole(struct stream *strm)
 {
 	if (!strm)
-		return EINVAL;
+		return;
 
-	if (!strm->mnat && strm->pinhole)
+	if (strm->pinhole)
 		tmr_start(&strm->tmr_natph, 10, natpinhole_handler, strm);
+}
 
-	return 0;
+
+void stream_stop_natpinhole(struct stream *strm)
+{
+	if (!strm)
+		return;
+
+	tmr_cancel(&strm->tmr_natph);
 }
 
 

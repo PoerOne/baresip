@@ -329,15 +329,15 @@ static double get_fps(const struct video *v)
 static int packet_handler(bool marker, uint64_t ts,
 			  const uint8_t *hdr, size_t hdr_len,
 			  const uint8_t *pld, size_t pld_len,
-			  void *arg)
+			  const struct video *vid)
 {
-	struct vtx *vtx = arg;
-	struct stream *strm = vtx->video->strm;
+	struct vtx *vtx = (struct vtx *)&vid->vtx;
+	struct stream *strm = vid->strm;
 	struct vidqent *qent;
 	uint32_t rtp_ts;
 	int err;
 
-	MAGIC_CHECK(vtx->video);
+	MAGIC_CHECK(vid);
 
 	if (!vtx->ts_base)
 		vtx->ts_base = ts;
@@ -516,9 +516,9 @@ static int vtx_thread(void *arg)
 	else
 		bitrate = vtx->video->cfg.bitrate;
 
-	const uint64_t max_delay = PKT_SIZE * 8 * 1000000L / bitrate + 1;
+	const uint64_t max_delay = PKT_SIZE * 8 * 1000000LL / bitrate + 1;
 	const uint64_t max_burst =
-		vtx->video->cfg.burst_bits * 1000000L / bitrate;
+		vtx->video->cfg.burst_bits * 1000000LL / bitrate;
 
 	struct vidqent *qent = NULL;
 	struct mbuf *mbd;
@@ -913,8 +913,7 @@ static void rtcp_nack_handler(struct vtx *vtx, struct rtcp_msg *msg)
 	}
 
 	mtx_lock(&vtx->lock_tx);
-	LIST_FOREACH(&vtx->sendqnb, le)
-	{
+	LIST_FOREACH(&vtx->sendqnb, le) {
 		struct vidqent *qent = le->data;
 
 		if (qent->seq == nack_pid)
@@ -1278,7 +1277,9 @@ int video_update(struct video *v, const char *peer)
 		video_stop_source(v);
 
 	if (dir == SDP_RECVONLY)
-		err |= stream_open_natpinhole(v->strm);
+		stream_open_natpinhole(v->strm);
+	else
+		stream_stop_natpinhole(v->strm);
 
 	if (dir & SDP_RECVONLY) {
 		err |= video_start_display(v, peer);
@@ -1347,6 +1348,8 @@ int video_start_source(struct video *v)
 		}
 
 		vtx->vs = vs;
+		if (v->vtx.vc)
+			info("%H", vtx_print_pipeline, &v->vtx);
 	}
 	else {
 		info("video: no video source\n");
@@ -1361,12 +1364,6 @@ int video_start_source(struct video *v)
 	}
 
 	tmr_start(&v->tmr, TMR_INTERVAL * 1000, tmr_handler, v);
-
-	if (v->vtx.vc && v->vrx.vc) {
-		info("%H%H",
-		     vtx_print_pipeline, &v->vtx,
-		     vrx_print_pipeline, &v->vrx);
-	}
 
 	return 0;
 }
@@ -1406,6 +1403,9 @@ int video_start_display(struct video *v, const char *peer)
 				v->vrx.device, err);
 			return err;
 		}
+
+		if (v->vrx.vc)
+			info("%H", vrx_print_pipeline, &v->vrx);
 	}
 	else {
 		info("video: no video display\n");
@@ -1554,7 +1554,7 @@ int video_encoder_set(struct video *v, struct vidcodec *vc,
 
 		vtx->enc = mem_deref(vtx->enc);
 		err = vc->encupdh(&vtx->enc, vc, &prm, params,
-				  packet_handler, vtx);
+				  packet_handler, v);
 		if (err) {
 			warning("video: encoder alloc: %m\n", err);
 			goto out;
@@ -1609,7 +1609,7 @@ int video_decoder_set(struct video *v, struct vidcodec *vc, int pt_rx,
 
 		vrx->dec = mem_deref(vrx->dec);
 
-		err = vc->decupdh(&vrx->dec, vc, fmtp);
+		err = vc->decupdh(&vrx->dec, vc, fmtp, v);
 		if (err) {
 			warning("video: decoder alloc: %m\n", err);
 			return err;
@@ -1829,6 +1829,38 @@ void video_set_devicename(struct video *v, const char *src, const char *disp)
 
 	str_ncpy(v->vtx.device, src, sizeof(v->vtx.device));
 	str_ncpy(v->vrx.device, disp, sizeof(v->vrx.device));
+}
+
+
+/**
+ * Get the device name of video source
+ *
+ * @param v    Video object
+ *
+ * @return Video source device name, otherwise NULL
+ */
+const char *video_get_src_dev(const struct video *v)
+{
+	if (!v)
+		return NULL;
+
+	return v->vtx.device;
+}
+
+
+/**
+ * Get the device name of video display
+ *
+ * @param v    Video object
+ *
+ * @return Video display device name, otherwise NULL
+ */
+const char *video_get_disp_dev(const struct video *v)
+{
+	if (!v)
+		return NULL;
+
+	return v->vrx.device;
 }
 
 
